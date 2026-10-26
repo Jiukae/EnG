@@ -178,19 +178,30 @@ class Session:
                 self.vars[v["id"]] = v["value"]
                 self.var_names[v["name"]] = v["id"]
         self.handlers, self.starts = {}, []
-        self.dialog = None
         self.dialog_log = []
         self.answer = ""
-        self.transcript = []  # 대화창에 들어간 모든 줄 (화면에는 마지막 9줄만 남음)
-        self.chat_id = self.list_names.get("대화창")
+        self.rows = []        # 화면글에 들어간 모든 줄 [글, 종류] (화면에는 마지막 몇 줄만 남음)
+        self.text_list = self.list_names.get("화면글")
+        self.kind_list = self.list_names.get("화면종류")
         self.steps = 0
+        self.frames = 0       # 부스트 모드가 아닐 때 걸리는 프레임 수 (반복 한 바퀴, 신호 기다리기마다 1)
+        self.turn_frames = []
+        self.cast_queue = []
+        # 오브젝트(글상자) 상태
+        self.objs = {}
         for o in project["objects"]:
+            e = o["entity"]
+            self.objs[o["id"]] = {"name": o["name"], "text": e.get("text", o.get("text", "")), "visible": e["visible"],
+                                  "bg": e.get("bgColor"), "fg": e.get("colour"), "dialog": None, "entity": e}
             for thread in json.loads(o["script"]):
                 head = thread[0]
                 if head["type"] == "when_run_button_click":
-                    self.starts.append(thread[1:])
+                    self.starts.append((o["id"], thread[1:]))
                 elif head["type"] == "when_message_cast":
-                    self.handlers.setdefault(head["params"][1], []).append(thread[1:])
+                    self.handlers.setdefault(head["params"][1], []).append((o["id"], thread[1:]))
+        self.cur = None
+        self.print_msg = next((m["id"] for m in project["messages"] if m["name"] == "채팅에 출력"), None)
+        self.new_msg = False
 
     # 편의 접근자
     def var(self, name):
@@ -199,10 +210,59 @@ class Session:
     def lst(self, name):
         return self.lists[self.list_names[name]]
 
+    def obj(self, name):
+        return next(o for o in self.objs.values() if o["name"] == name)
+
+    def screen(self):
+        """지금 화면에 보이는 말풍선 줄: [(글, 'bot'|'me', 배경색, 글자색)]"""
+        out = []
+        k = 1
+        while True:
+            try:
+                bot, me = self.obj(f"봇칸{k}"), self.obj(f"나칸{k}")
+            except StopIteration:
+                return out
+            if bot["visible"]:
+                out.append((bot["text"], "bot", bot["bg"], bot["fg"]))
+            elif me["visible"]:
+                out.append((me["text"], "me", me["bg"], me["fg"]))
+            k += 1
+
+    def transcript_lines(self):
+        """대화 전체를 '봇: …' / '나: …' 줄로 (말풍선 여러 줄은 한 줄로 이어서) 돌려준다."""
+        out = []
+        prev_len = 0
+        for text, kind, starts_msg in self.rows:
+            if kind == "생각":
+                continue
+            tag = {"봇": "봇", "나": "나"}.get(kind, "알림")
+            if out and not starts_msg and out[-1][0] == tag:
+                out[-1][1] += ("" if prev_len >= 24 else " ") + text
+            else:
+                out.append([tag, text, starts_msg])
+            prev_len = len(text)
+        return out
+
+    def run_handlers(self, msg_id):
+        if msg_id == self.print_msg:
+            self.new_msg = True
+        for oid, h in self.handlers.get(msg_id, []):
+            saved = self.cur
+            self.cur = oid
+            try:
+                self.exec_seq(h)
+            except BreakLoop:
+                pass
+            finally:
+                self.cur = saved
+
     def run(self):
         try:
-            for t in self.starts:
+            for oid, t in self.starts:
+                self.cur = oid
                 self.exec_seq(t)
+            while self.cast_queue:
+                self.run_handlers(self.cast_queue.pop(0))
         except EndOfInput:
             pass
         return self
@@ -233,6 +293,7 @@ class Session:
             try:
                 for _ in range(int(math.floor(n))):
                     self.exec_seq(st[0])
+                    self.frames += 1
             except BreakLoop:
                 pass
             return
@@ -240,6 +301,7 @@ class Session:
             try:
                 while True:
                     self.exec_seq(st[0])
+                    self.frames += 1
                     self.steps += 1
                     if self.steps > 5_000_000:
                         raise EntryError("무한 반복")
@@ -255,6 +317,7 @@ class Session:
                     if not v:
                         break
                     self.exec_seq(st[0])
+                    self.frames += 1
                     self.steps += 1
                     if self.steps > 5_000_000:
                         raise EntryError("무한 반복")
@@ -266,11 +329,13 @@ class Session:
         if t == "message_cast_wait":
             if p[0] not in [m["id"] for m in self.p["messages"]]:
                 raise EntryError("no such message")
-            for h in self.handlers.get(p[0], []):
-                try:
-                    self.exec_seq(h)
-                except BreakLoop:
-                    pass
+            self.frames += 1
+            self.run_handlers(p[0])
+            return
+        if t == "message_cast":
+            if p[0] not in [m["id"] for m in self.p["messages"]]:
+                raise EntryError("no such message")
+            self.cast_queue.append(p[0])
             return
         vals = [self.ev(x) if isinstance(x, dict) else x for x in p]
         if t == "set_variable":
@@ -287,8 +352,11 @@ class Session:
         elif t == "add_value_to_list":
             arr = self.need_list(vals[1])
             arr.append(vals[0])
-            if vals[1] == self.chat_id:
-                self.transcript.append(js_str(vals[0]))
+            if vals[1] == self.text_list:
+                self.rows.append([js_str(vals[0]), None, self.new_msg])
+                self.new_msg = False
+            elif vals[1] == self.kind_list and self.rows and self.rows[-1][1] is None:
+                self.rows[-1][1] = js_str(vals[0])
             if len(arr) > 5000:
                 del arr[0]
         elif t == "remove_value_from_list":
@@ -311,19 +379,35 @@ class Session:
             arr[int(i) - 1] = vals[2]
         elif t in ("show_list", "hide_list", "set_visible_answer", "wait_second"):
             pass
-        elif t == "dialog":
-            msg = vals[0]
-            self.dialog = "    " if msg == "" else js_str(msg)
-            self.dialog_log.append(self.dialog)
         elif t == "remove_dialog":
-            self.dialog = None
+            self.objs[self.cur]["dialog"] = None
         elif t == "ask_and_wait":
             if vals[0] in (None, ""):
                 raise EntryError("message can not be empty")
+            o = self.objs[self.cur]
+            o["dialog"] = js_str(vals[0])
+            # '신호 보내기' 로 시작된 스크립트는 다음 프레임에 돈다 (묻는 말풍선이 생긴 뒤)
+            while self.cast_queue:
+                self.run_handlers(self.cast_queue.pop(0))
+            self.dialog_log.append(o["dialog"])
+            self.turn_frames.append(self.frames)
+            self.frames = 0
             if not self.inputs:
                 raise EndOfInput()
             self.answer = self.inputs.pop(0)
-            self.dialog = None
+            o["dialog"] = None
+        elif t == "text_write":
+            self.objs[self.cur]["text"] = js_str(vals[0])
+        elif t == "text_change_bg_color":
+            c = js_str(vals[0])
+            self.objs[self.cur]["bg"] = c if c.startswith("#") else "#" + c
+        elif t == "text_change_font_color":
+            c = js_str(vals[0])
+            self.objs[self.cur]["fg"] = c if c.startswith("#") else "#" + c
+        elif t == "show":
+            self.objs[self.cur]["visible"] = True
+        elif t == "hide":
+            self.objs[self.cur]["visible"] = False
         else:
             raise EntryError(f"시뮬레이터가 모르는 명령 블록: {t}")
 
@@ -412,6 +496,16 @@ class Session:
             return self.nickname if self.nickname is not None else " "
         if t == "length_of_string":
             return len(S(vals[1]))
+        if t == "text_color":
+            return p[0]
+        if t == "quotient_and_mod":
+            a, c = js_parse_float(vals[1]), js_parse_float(vals[3])
+            a = 0.0 if math.isnan(a) else a
+            c = 0.0 if math.isnan(c) else c
+            if c == 0:
+                return math.nan
+            q = math.floor(a / c)
+            return to_num(Decimal(js_str(float(q)))) if vals[5] == "QUOTIENT" else to_num(Decimal(js_str(a - c * q)))
         if t == "reverse_of_string":
             return S(vals[1])[::-1]
         if t == "combine_something":
@@ -471,4 +565,5 @@ if __name__ == "__main__":
             break
         lines.append(line)
     s = Session(project, server, username=user, nickname=user, inputs=lines).run()
-    print("\n".join(s.lst("대화창")))
+    for tag, text, _ in s.transcript_lines():
+        print(f"{tag}: {text}")
