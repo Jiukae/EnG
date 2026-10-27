@@ -91,8 +91,12 @@ def main():
     again = Session(project, server, username="minsu01", nickname="민수", seed=4, inputs=[
         "나비가 요즘 밥을 안 먹어",
     ]).run()
+    records = Session(project, server, username="minsu01", nickname="민수", seed=5, inputs=[
+        "기록 검색: 나비", "기록 통계",
+    ]).run()
     stages = [stage_html(first, "① 처음 대화: 공감하고, 되묻고, 들은 걸 기억해요"),
-              stage_html(again, "② 다시 접속: 지난 대화를 보여 주고, 기억한 '나비'를 알아봐요")]
+              stage_html(again, "② 다시 접속: 지난 대화를 보여 주고, 기억한 '나비'를 알아봐요"),
+              stage_html(records, "③ 대화기록표(테이블): 기록 검색 · 기록 통계")]
     with tempfile.TemporaryDirectory() as tmp:
         page_path = os.path.join(tmp, "preview.html")
         open(page_path, "w", encoding="utf-8").write(page(stages))

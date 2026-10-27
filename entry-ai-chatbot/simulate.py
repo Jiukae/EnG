@@ -70,7 +70,7 @@ def js_parse_float(v):
 
 def js_str(v):
     if v is None:
-        return "undefined"
+        return "null"  # 테이블 블록이 못 찾으면 null 을 돌려준다
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, int):
@@ -147,6 +147,58 @@ def js_loose_not_equal(a, b):
     return not (x == y)
 
 
+def js_parse_int(v):
+    m = re.match(r"^[+-]?\d+", js_str(v).lstrip(_JS_WS))
+    return int(m.group(0)) if m else math.nan
+
+
+def entry_to_number(v):
+    """엔트리 util/common.js 의 toNumber (테이블 칸에 넣을 때 숫자 같은 글은 숫자로 바꾼다)."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        n = js_number(v)
+        if not math.isnan(js_parse_int(v)) and not math.isnan(n):
+            return int(n) if n == int(n) else n
+    return v
+
+
+def js_loose_equal(a, b):
+    """자바스크립트 == (테이블 VLOOKUP 이 쓰는 비교)."""
+    if a is None or b is None:
+        return a is None and b is None
+    if isinstance(a, bool):
+        a = 1.0 if a else 0.0
+    if isinstance(b, bool):
+        b = 1.0 if b else 0.0
+    num = (int, float)
+    if isinstance(a, str) and isinstance(b, str):
+        return a == b
+    if isinstance(a, num) and isinstance(b, num):
+        return float(a) == float(b)
+    x, y = js_number(a), js_number(b)
+    return x == y
+
+
+def number_value(v):
+    """Scope.getNumberValue: parseFloat(v) || 0"""
+    x = js_parse_float(v)
+    return 0 if math.isnan(x) else x
+
+
+def column_index(col):
+    """DataTable.getColumnIndex: 숫자면 그대로, 영문자면 A=1…, 그 밖은 0."""
+    if is_number(col):
+        return js_parse_float(col)
+    s = js_str(col)
+    if re.search(r"[^A-Za-z]|\s", s) or not s:
+        return 0
+    n = 0
+    for ch in s.upper():
+        n = n * 26 + ord(ch) - 64
+    return n
+
+
 def to_num(d):
     f = float(d)
     return int(f) if f == int(f) and abs(f) < 2 ** 53 else f
@@ -200,6 +252,23 @@ class Session:
                 elif head["type"] == "when_message_cast":
                     self.handlers.setdefault(head["params"][1], []).append((o["id"], thread[1:]))
         self.cur = None
+        # 함수
+        self.funcs, self.ctx = {}, []
+        for f in project.get("functions", []):
+            head = json.loads(f["content"])[0][0]
+            ptypes, fb = [], head["params"][0]
+            while fb:
+                if fb["type"] == "function_field_string":
+                    ptypes.append(fb["params"][0]["type"])
+                fb = fb["params"][1] if len(fb["params"]) > 1 else None
+            self.funcs[f["id"]] = {"type": f["type"], "head": head, "ptypes": ptypes,
+                                   "locals": f.get("localVariables", [])}
+        # 테이블 (실행할 때마다 작품에 저장된 내용으로 시작한다)
+        self.tables, self.table_names, self.opened_tables = {}, {}, []
+        for t in project.get("tables", []):
+            rows = [[entry_to_number(x) for x in r] + [0] * (len(t["fields"]) - len(r)) for r in t["data"]]
+            self.tables[t["id"]] = {"name": t["name"], "fields": list(t["fields"]), "rows": rows}
+            self.table_names[t["name"]] = t["id"]
         self.print_msg = next((m["id"] for m in project["messages"] if m["name"] == "채팅에 출력"), None)
         self.new_msg = False
 
@@ -242,6 +311,47 @@ class Session:
                 out.append([tag, text, starts_msg])
             prev_len = len(text)
         return out
+
+    def table(self, name):
+        return self.tables[self.table_names[name]]
+
+    def call_function(self, fid, args):
+        f = self.funcs.get(fid)
+        if f is None:
+            raise EntryError(f"없는 함수 {fid}")
+        ctx = {"params": dict(zip(f["ptypes"], args)), "locals": {lv["id"]: lv["value"] for lv in f["locals"]}}
+        self.ctx.append(ctx)
+        try:
+            try:
+                self.exec_seq(f["head"]["statements"][0] if f["head"]["statements"] else [])
+            except BreakLoop:
+                pass
+            if f["type"] == "value":
+                return self.ev(f["head"]["params"][3]) if f["head"]["params"][3] else None
+        finally:
+            self.ctx.pop()
+
+    # 테이블 칸 읽기: 엔트리 dmetTable.getValue([줄, 칸]) — 줄 0 은 머리글
+    def table_value(self, t, row, col):
+        if not isinstance(row, (int, float)) or not isinstance(col, (int, float)) or row != int(row) or col != int(col):
+            return None
+        row, col = int(row), int(col)
+        if row == 0:
+            line = t["fields"]
+        elif 1 <= row <= len(t["rows"]):
+            line = t["rows"][row - 1]
+        else:
+            return None
+        return line[col - 1] if 1 <= col <= len(line) else None
+
+    @staticmethod
+    def table_exists(v):
+        # DataTableSource.isExist: 0 이나 참 같은 값만 '있음' (빈 문자열은 없음으로 본다)
+        if v is None:
+            return False
+        if isinstance(v, str):
+            return v != ""
+        return v == 0 or js_truthy(v)
 
     def run_handlers(self, msg_id):
         if msg_id == self.print_msg:
@@ -338,6 +448,36 @@ class Session:
             self.cast_queue.append(p[0])
             return
         vals = [self.ev(x) if isinstance(x, dict) else x for x in p]
+        if t.startswith("func_"):
+            if self.funcs.get(t[5:], {}).get("type") != "normal":
+                raise EntryError(f"값 함수를 명령처럼 씀: {t}")
+            self.call_function(t[5:], vals[:-1])
+            return
+        if t == "set_func_variable":
+            self.ctx[-1]["locals"][vals[0]] = vals[1]
+            return
+        if t in ("append_row_to_table", "set_value_from_table", "delete_row_from_table", "open_table"):
+            tb = self.tables.get(vals[0])
+            if tb is None:
+                raise EntryError("없는 테이블")
+            if t == "append_row_to_table":
+                if len(tb["rows"]) >= 3000:
+                    raise EntryError("테이블 줄이 너무 많음")
+                tb["rows"].append([0] * len(tb["fields"]))
+            elif t == "set_value_from_table":
+                row = number_value(vals[1]) - 1
+                col = column_index(vals[2])
+                if self.table_exists(self.table_value(tb, row, col)):
+                    line = tb["fields"] if row == 0 else tb["rows"][int(row) - 1]
+                    line[int(col) - 1] = entry_to_number(vals[3])
+            elif t == "delete_row_from_table":
+                idx = number_value(vals[1]) - 1
+                if not (idx == int(idx) and 1 <= idx <= len(tb["rows"])):
+                    raise EntryError("없는 줄을 지움")
+                del tb["rows"][int(idx) - 1]
+            else:
+                self.opened_tables.append(tb["name"])
+            return
         if t == "set_variable":
             self.vars[self.need_var(vals[0])] = vals[1]
         elif t == "change_variable":
@@ -431,6 +571,11 @@ class Session:
         t, p = b["type"], b["params"]
         if t in ("text", "number"):
             return p[0] if p else ""
+        if t.startswith("stringParam_"):
+            return self.ctx[-1]["params"][t]
+        if t == "get_func_variable":
+            v = self.ctx[-1]["locals"].get(p[0])
+            return v if js_truthy(v) else 0   # 엔트리: localVariable?.value || 0
         if t == "True":
             return True
         if t == "False":
@@ -496,6 +641,25 @@ class Session:
             return self.nickname if self.nickname is not None else " "
         if t == "length_of_string":
             return len(S(vals[1]))
+        if t.startswith("func_"):
+            if self.funcs.get(t[5:], {}).get("type") != "value":
+                raise EntryError(f"보통 함수를 값처럼 씀: {t}")
+            return self.call_function(t[5:], vals)
+        if t in ("get_table_count", "get_value_from_table", "get_value_v_lookup"):
+            tb = self.tables.get(vals[0])
+            if tb is None:
+                raise EntryError("없는 테이블")
+            if t == "get_table_count":
+                return len(tb["rows"]) + 1 if vals[1] == "ROW" else len(tb["fields"])
+            if t == "get_value_from_table":
+                v = self.table_value(tb, number_value(vals[1]) - 1, column_index(vals[2]))
+                return v if self.table_exists(v) else None
+            col, rcol, target = column_index(vals[1]), column_index(vals[3]), vals[2]
+            for i in range(len(tb["rows"]) + 1):
+                if js_loose_equal(self.table_value(tb, i, col), target):
+                    v = self.table_value(tb, i, rcol)
+                    return v if self.table_exists(v) else None
+            return None
         if t == "text_color":
             return p[0]
         if t == "quotient_and_mod":

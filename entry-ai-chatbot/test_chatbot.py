@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """엔트리 AI 챗봇 '엔봇' 작품 검사.
 
-1) 구조: 모든 블록이 entryjs 블록 정의(파라미터 개수·종류·드롭다운 값)와 맞는지, id 가 겹치지 않는지
+1) 구조: 모든 블록(함수 정의·호출, 테이블 블록 포함)이 entryjs 정의(파라미터 개수·종류·드롭다운 값)와 맞는지,
+   id 가 겹치지 않는지, 값 함수에 반복이 없는지, 테이블 데이터에 빈 칸·겹치는 키가 없는지
 2) .ent 압축 파일
 3) 화면: 말풍선 글상자 상태
 4) 대화: 되받기·공감·이어 묻기, 이야기 속 사실 기억, 모르는 것 배우기, 다시 접속했을 때 이어 가기,
-   사용자별 저장, 명령어, 무작위 입력에서 블록 오류가 없는지
+   사용자별 저장, 대화기록표(검색·통계·다시 채우기), 개인정보·위기 대응, 명령어, 무작위 입력에서 블록 오류가 없는지
 
 실행:  python3 test_chatbot.py
 """
@@ -18,6 +19,7 @@ import tarfile
 import unittest
 
 import data as D
+from build_project import LOG_FIELDS, MAX_HISTORY_LINES, MAX_LINE_LEN
 from dsl import walk_blocks
 from simulate import EntryError, Session
 
@@ -82,6 +84,19 @@ SCHEMA = {
     "get_translated_string": ([("D", LANGS), B, ("DD", "translate")], 0),
     "text": ([TI], 0),
     "number": ([TI], 0),
+    # 데이터 분석(테이블) 블록 — src/playground/blocks/block_analysis.js
+    "append_row_to_table": ([("DD", "tables"), ("D", ["ROW"]), I], 0),
+    "delete_row_from_table": ([("DD", "tables"), B, ("D", ["ROW"]), I], 0),
+    "set_value_from_table": ([("DD", "tables"), B, B, B, I], 0),
+    "get_table_count": ([("DD", "tables"), ("D", ["ROW", "COL"])], 0),
+    "get_value_from_table": ([("DD", "tables"), B, B], 0),
+    "get_value_v_lookup": ([("DD", "tables"), B, B, B], 0),
+    "open_table": ([("DD", "tables"), I], 0),
+    # 함수 블록 — src/playground/blocks/block_func.js, src/class/function.js
+    "function_create": ([("P",), I], 1),
+    "function_create_value": ([("P",), I, L, B], 1),
+    "get_func_variable": ([("DD", "locals"), T], 0),
+    "set_func_variable": ([("DD", "locals"), B, I], 0),
 }
 VALUE_BLOCKS = {
     "get_canvas_input_value", "get_variable", "value_of_index_from_list", "length_of_list", "is_included_in_list",
@@ -89,11 +104,34 @@ VALUE_BLOCKS = {
     "get_date", "get_user_name", "get_nickname", "length_of_string", "reverse_of_string", "combine_something",
     "char_at", "substring", "count_match_string", "index_of_string", "replace_string", "change_string_case",
     "get_translated_string", "text", "number", "text_color",
+    "get_table_count", "get_value_from_table", "get_value_v_lookup", "get_func_variable",
 }
-EVENT_BLOCKS = {"when_run_button_click", "when_message_cast"}
+EVENT_BLOCKS = {"when_run_button_click", "when_message_cast", "function_create", "function_create_value"}
+FUNCTIONS = {f["id"]: f for f in PROJECT["functions"]}
 
 
-def ids_of(kind):
+def func_fields(f):
+    """함수 정의 블록의 이름표/문자 매개변수 사슬 → [(종류, 값)]"""
+    head = json.loads(f["content"])[0][0]
+    out, b = [], head["params"][0]
+    while b:
+        out.append(("label", b["params"][0]) if b["type"] == "function_field_label" else ("string", b["params"][0]["type"]))
+        b = b["params"][1]
+    return head, out
+
+
+def is_value_block(p):
+    t = p["type"]
+    if t.startswith("func_"):
+        return FUNCTIONS[t[5:]]["type"] == "value"
+    return t in VALUE_BLOCKS or t.startswith("stringParam_")
+
+
+def ids_of(kind, owner=None):
+    if kind == "tables":
+        return {t["id"] for t in PROJECT["tables"]}
+    if kind == "locals":
+        return {v["id"] for v in owner.get("localVariables", [])}
     if kind == "variables":
         return {v["id"] for v in PROJECT["variables"] if v["variableType"] != "list"}
     if kind == "lists":
@@ -108,11 +146,37 @@ def list_data(name):
 class StructureTest(unittest.TestCase):
     def test_blocks_match_entry_schema(self):
         seen, problems = set(), []
-        for _o, b in walk_blocks(PROJECT):
+        for owner, b in walk_blocks(PROJECT):
             t = b["type"]
             if b["id"] in seen:
                 problems.append(f"중복 id {b['id']}")
             seen.add(b["id"])
+            if t.startswith("func_"):
+                # 함수 호출: 문자 매개변수마다 값 블록 하나, 일반 함수는 끝에 Indicator(None)
+                f = FUNCTIONS.get(t[5:])
+                if f is None:
+                    problems.append(f"없는 함수 {t}")
+                    continue
+                n = sum(1 for k, _ in func_fields(f)[1] if k == "string")
+                want = n + (f["type"] == "normal")
+                if len(b["params"]) != want or any(not (isinstance(p, dict) and is_value_block(p))
+                                                    for p in b["params"][:n]):
+                    problems.append(f"{t} 매개변수 {b['params']}")
+                if f["type"] == "normal" and b["params"][-1] is not None:
+                    problems.append(f"{t} 끝 Indicator")
+                continue
+            if t.startswith("stringParam_"):
+                fields = func_fields(owner)[1] if "content" in owner else []
+                if ("string", t) not in fields or b["params"]:
+                    problems.append(f"함수 밖이나 다른 함수에서 쓴 매개변수 {t}")
+                continue
+            if t in ("function_field_label", "function_field_string"):
+                ok = (isinstance(b["params"][0], str) if t == "function_field_label"
+                      else b["params"][0]["type"].startswith("stringParam_"))
+                nxt = b["params"][1]
+                if not ok or len(b["params"]) != 2 or not (nxt is None or nxt["type"].startswith("function_field_")):
+                    problems.append(f"{t} 모양 {b['params']}")
+                continue
             if t not in SCHEMA:
                 problems.append(f"모르는 블록 {t}")
                 continue
@@ -131,8 +195,11 @@ class StructureTest(unittest.TestCase):
             for i, p in enumerate(params):
                 k = kinds[i]
                 if k == B:
-                    if p is not None and not (isinstance(p, dict) and p["type"] in VALUE_BLOCKS):
+                    if p is not None and not (isinstance(p, dict) and is_value_block(p)):
                         problems.append(f"{t}[{i}] 값 블록 자리에 {p!r}")
+                elif k == ("P",):
+                    if not (isinstance(p, dict) and p["type"] == "function_field_label"):
+                        problems.append(f"{t}[{i}] 함수 이름표 자리에 {p!r}")
                 elif isinstance(k, tuple) and k[0] == "D":
                     if p not in k[1]:
                         problems.append(f"{t}[{i}] 드롭다운 값 {p!r}")
@@ -140,7 +207,7 @@ class StructureTest(unittest.TestCase):
                     if k[1] == "translate":
                         if p not in LANGS:
                             problems.append(f"{t}[{i}] 번역 언어 {p!r}")
-                    elif p not in ids_of(k[1]):
+                    elif p not in ids_of(k[1], owner):
                         problems.append(f"{t}[{i}] 없는 {k[1]} id {p!r}")
                 elif p is not None:
                     problems.append(f"{t}[{i}] ({k}) 자리에 {p!r}")
@@ -148,9 +215,9 @@ class StructureTest(unittest.TestCase):
                 problems.append(f"{t} statements 개수 {len(b.get('statements', []))} != {n_st}")
             for st in b.get("statements", []):
                 for sb in st:
-                    if sb["type"] in VALUE_BLOCKS | EVENT_BLOCKS:
+                    if sb["type"] in EVENT_BLOCKS or is_value_block(sb):
                         problems.append(f"{t} 안에 문장이 아닌 블록 {sb['type']}")
-        self.assertEqual(problems, [])
+        self.assertEqual(problems[:20], [])
 
     def test_threads_start_with_events(self):
         for o in PROJECT["objects"]:
@@ -172,13 +239,58 @@ class StructureTest(unittest.TestCase):
         self.assertEqual(sorted(rt), ["기억저장소", "대화기록"])
         names = [v["name"] for v in p["variables"]]
         self.assertEqual(len(names), len(set(names)), "변수/리스트 이름 중복")
-        for a, b in [("주제목록", "주제질문목록"), ("정의단어", "정의설명"), ("의도키워드", "의도답변"),
-                     ("시작키", "시작질문")]:
-            self.assertEqual(len(list_data(a)), len(list_data(b)), a)
-        for k in list_data("의도키워드") + list_data("정의단어"):
-            self.assertTrue(k and k == k.lower() and " " not in k, k)
-        for name in ["긍정어", "부정어", "주제목록", "불용어", "조사목록"]:
-            self.assertTrue(all(list_data(name)), name)
+        for name in ["불용어", "조사목록", "뒤집는말"]:
+            self.assertTrue(list_data(name) and all(list_data(name)), name)
+
+    def test_tables(self):
+        tables = {t["name"]: t for t in PROJECT["tables"]}
+        self.assertEqual(set(tables), {"표-주제", "표-단어뜻", "표-일상대화", "표-감정어", "표-먼저묻기", "대화기록표"})
+        self.assertEqual(tables["대화기록표"]["fields"], LOG_FIELDS)
+        self.assertEqual(tables["대화기록표"]["data"], [])
+        for name, t in tables.items():
+            self.assertLessEqual(len(t["data"]), 3000, name)  # 엔트리 테이블 최대 행 수
+            for row in t["data"]:
+                self.assertEqual(len(row), len(t["fields"]), (name, row))
+                # 빈 칸은 엔트리에서 '값 없음'이 되어 VLOOKUP·바꾸기가 안 되므로 넣지 않는다
+                self.assertTrue(all(str(c).strip() for c in row), (name, row))
+            keys = [row[0] for row in t["data"]]
+            self.assertEqual(len(keys), len(set(keys)), f"{name} 첫 열(찾는 열)이 겹침")
+            # 첫 열이 다른 표의 머리글과 같으면 VLOOKUP 이 머리글 행을 찾아 버린다
+            self.assertNotIn(t["fields"][0], keys, name)
+        for name in ["표-단어뜻", "표-일상대화"]:
+            for k in [r[0] for r in tables[name]["data"]]:
+                self.assertTrue(k == k.lower() and " " not in k, (name, k))
+        for key, answers in tables["표-일상대화"]["data"]:
+            # 대답이 여러 개면 ' | ' 로 나눠 둔다. 말 속 조각을 찾는 방식이라 키워드는 2~10글자
+            self.assertTrue(2 <= len(key) <= 10, key)
+            self.assertTrue(all(a.strip() for a in answers.split(" | ")), key)
+        for word, score in tables["표-감정어"]["data"]:
+            self.assertIsInstance(score, int)
+            self.assertNotEqual(score, 0, word)
+        # 엔트리는 셀 값을 숫자로 바꿀 수 있으면 숫자로 바꾼다 — 낱말 칸이 숫자처럼 보이면 안 된다
+        for name in ["표-주제", "표-단어뜻", "표-일상대화", "표-감정어"]:
+            for row in tables[name]["data"]:
+                self.assertFalse(re.fullmatch(r"\s*-?[0-9.]+\s*", str(row[0])), (name, row))
+
+    def test_functions(self):
+        calls = {b["type"][5:] for _o, b in walk_blocks(PROJECT) if b["type"].startswith("func_")}
+        for f in PROJECT["functions"]:
+            head, fields = func_fields(f)
+            self.assertEqual(len(json.loads(f["content"])), 1, "함수 안에 떨어진 블록 묶음")
+            self.assertEqual(head["type"], "function_create_value" if f["type"] == "value" else "function_create")
+            self.assertEqual(fields[0][0], "label")
+            self.assertIn(f["id"], calls, f"쓰지 않는 함수 {fields[0][1]}")
+            self.assertEqual(f["useLocalVariables"], bool(f["localVariables"]))
+            for v in f["localVariables"]:
+                self.assertTrue(v["id"].startswith(f["id"] + "_"), v)
+            if f["type"] == "value":
+                # 값 함수 안에서 반복·기다리기를 쓰면 여러 프레임에 걸쳐 돌아 값이 늦게(Promise로) 나온다
+                types = {b["type"] for o, b in walk_blocks(PROJECT) if o is f}
+                self.assertFalse(types & {"repeat_basic", "repeat_inf", "repeat_while_true", "wait_second",
+                                          "ask_and_wait", "message_cast_wait", "append_row_to_table"}, fields[0][1])
+                normal = {g["id"] for g in PROJECT["functions"] if g["type"] == "normal"}
+                self.assertFalse({t[5:] for t in types if t.startswith("func_")} & normal, fields[0][1])
+        self.assertGreaterEqual(len(PROJECT["functions"]), 30)
 
     def test_ent_archive(self):
         with tarfile.open(os.path.join(HERE, "entry-ai-chatbot.ent"), "r:gz") as tar:
@@ -251,7 +363,7 @@ class ConversationTest(unittest.TestCase):
         self.assertIn("고양이 이름이 뭐예요?", r[1])
         self.assertIn("엄마랑 싸웠군요", r[2])
         self.assertIn("축구해서 이겼군요", r[3])
-        self.assertTrue(any(f in r[3] for f in ["선수", "들려줄래요", "제일 좋았어요"]), r[3])
+        self.assertTrue(r[3].endswith("?"), r[3])  # 이어서 되묻는다
 
     def test_no_canned_fallback(self):
         rng = random.Random(1)
@@ -289,12 +401,13 @@ class ConversationTest(unittest.TestCase):
         chat(server, "d", ["오늘 시험 망쳤어"])
         s = chat(server, "d", [])
         welcome = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
-        self.assertIn("시험 이야기를 했었죠", welcome)
+        self.assertIn("시험", welcome)
+        self.assertTrue(any(w in welcome for w in ["지난번", "저번"]), welcome)
         server = {}
         chat(server, "e", ["아 진짜 짜증나"])
         s = chat(server, "e", [])
         welcome = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
-        self.assertIn("기분이 안 좋아 보였는데", welcome)
+        self.assertIn(welcome.replace("민수", "{이름}"), [t.replace(" [기분]", "") for t in D.PHRASES["말-환영기분"]])
 
     def test_learns_unknown_words_and_questions(self):
         server = {}
@@ -304,7 +417,7 @@ class ConversationTest(unittest.TestCase):
         self.assertTrue(r[0].startswith("블랙홀은 중력이"))
         self.assertIn("양자컴퓨터", r[1])
         self.assertIn("양자컴퓨터는 양자의 원리로 계산하는 컴퓨터군요", r[2])
-        self.assertIn("아직 제가 몰라요", r[3])
+        self.assertIn(r[3], D.PHRASES["말-모르는질문"])
         s = chat(server, "f", ["양자컴퓨터 알아?", "우리 학교 이름이 뭐게?"])
         r = bot_replies(s)
         self.assertIn("양자컴퓨터는 양자의 원리로 계산하는 컴퓨터", r[0])
@@ -367,8 +480,10 @@ class StorageTest(unittest.TestCase):
         s = chat(server, "u", [f"메시지 {i}" for i in range(25)] + ["가" * 300])
         blob = server[s.list_names["대화기록"]][0]
         self.assertTrue(blob.startswith("u|"))
-        self.assertEqual(blob.count("¶"), 30)
-        self.assertIn("¶나: " + "가" * 117 + "…¶", blob)
+        self.assertEqual(blob.count("¶"), MAX_HISTORY_LINES)
+        line = [x for x in blob.split("¶") if x.startswith("나|") and x.endswith("…")]
+        self.assertEqual(len(line), 1)
+        self.assertEqual(len(line[0]), MAX_LINE_LEN + 1)
 
     def test_new_chat_and_forget(self):
         server = {}
@@ -416,6 +531,81 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(s.obj("상태")["text"], "● 대화 종료")
 
 
+class RecordTableTest(unittest.TestCase):
+    """대화기록표(엔트리 테이블): 번호·날짜·시각·누가·주제·감정·내용"""
+
+    @staticmethod
+    def rows(s):
+        return s.table("대화기록표")["rows"]
+
+    def test_every_line_goes_into_the_table(self):
+        s = chat({}, "r1", ["오늘 시험 망쳤어", "고마워"])
+        rows = self.rows(s)
+        self.assertEqual([r[0] for r in rows], [1, 2, 3, 4])
+        self.assertEqual([r[3] for r in rows], ["나", "봇", "나", "봇"])
+        self.assertEqual(rows[0][4], "시험")
+        self.assertLess(rows[0][5], 0)
+        self.assertEqual(rows[1][5], "-")
+        self.assertEqual(rows[0][6], "오늘 시험 망쳤어")
+        self.assertTrue(re.fullmatch(r"\d{4}-\d\d-\d\d", rows[0][1]), rows[0][1])
+        self.assertTrue(re.fullmatch(r"\d\d:\d\d", rows[0][2]), rows[0][2])
+        for r in rows:  # 엔트리 테이블은 빈 칸을 '값 없음'으로 다루므로 비워 두지 않는다
+            self.assertTrue(all(str(c) != "" for c in r), r)
+
+    def test_table_is_rebuilt_from_server_on_next_visit(self):
+        server = {}
+        first = chat(server, "r2", ["나 고양이 키워", "나비", "오늘 학교에서 발표했어"])
+        again = chat(server, "r2", [])
+        self.assertEqual(self.rows(again), self.rows(first))
+        self.assertEqual(self.rows(again)[4][4], "발표")  # '발표했어' 에서 주제 낱말을 찾는다
+
+    def test_old_history_format_is_read(self):
+        server = {}
+        list_id = next(v["id"] for v in PROJECT["variables"] if v["name"] == "대화기록")
+        server[list_id] = ["r3|나: 안녕¶봇: 반가워요¶"]
+        s = chat(server, "r3", [])
+        self.assertEqual([(r[3], r[6]) for r in self.rows(s)], [("나", "안녕"), ("봇", "반가워요")])
+
+    def test_search_stats_and_open(self):
+        s = chat({}, "r4", ["나 고양이 키워", "나비", "나비가 밥을 안 먹어", "기록 검색: 나비", "기록 통계", "기록표"])
+        r = bot_replies(s)
+        self.assertIn("'나비' 기록을", r[3])
+        # 최근 기록부터 보여 준다
+        self.assertLess(r[3].index("나: 나비가 밥을 안 먹어"), r[3].index("나: 나비", r[3].index("나: 나비가") + 1))
+        self.assertTrue(r[3].endswith("나: 나비"), r[3])
+        self.assertIn("민수님 4줄", r[4])
+        self.assertIn("엔봇 4줄", r[4])
+        self.assertIn("제일 많이 나온 주제: 고양이", r[4])
+        self.assertEqual(s.opened_tables, ["대화기록표"])
+        self.assertIn("모두 10줄", r[5])
+        s = chat({}, "r5", ["기록 검색: 없는말"])
+        self.assertIn("기록은 없어요", bot_replies(s)[0])
+
+    def test_new_chat_clears_table(self):
+        s = chat({}, "r6", ["안녕", "오늘 재밌었어", "새 대화"])
+        self.assertEqual([r[6] for r in self.rows(s)][0], "새 대화")
+        self.assertEqual(len(self.rows(s)), 2)
+        self.assertEqual(self.rows(s)[0][0], 1)
+
+
+class SafetyTest(unittest.TestCase):
+    def test_private_info_is_not_remembered_or_logged(self):
+        server = {}
+        s = chat(server, "p1", ["내 비밀번호는 abc123이야", "기억해: 비번 = 1234", "내 전화번호는 010-1234-5678"])
+        for reply in bot_replies(s):
+            self.assertIn(reply.replace("민수", "{이름}"), D.PHRASES["말-개인정보"])
+        everything = json.dumps([server, RecordTableTest.rows(s), memory(s)], ensure_ascii=False)
+        for secret in ["abc123", "1234", "5678"]:
+            self.assertNotIn(secret, everything)
+        self.assertIn("🔒", RecordTableTest.rows(s)[0][6])
+
+    def test_crisis_gets_help_numbers(self):
+        s = chat({}, "p2", ["요즘 너무 힘들어서 죽고 싶어"])
+        reply = bot_replies(s)[0]
+        self.assertIn("1388", reply)
+        self.assertIn("109", reply)
+
+
 class RobustnessTest(unittest.TestCase):
     def test_random_inputs_never_crash(self):
         rng = random.Random(7)
@@ -438,7 +628,7 @@ class RobustnessTest(unittest.TestCase):
             worst = max([worst] + s.turn_frames[1:])
         self.assertLess(worst, 400, "부스트 모드 없이 한 번 대답하는 데 너무 오래 걸림")
         for item in server[s.list_names["대화기록"]]:
-            self.assertLessEqual(item.count("¶"), 30)
+            self.assertLessEqual(item.count("¶"), MAX_HISTORY_LINES)
 
 
 if __name__ == "__main__":

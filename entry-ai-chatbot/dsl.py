@@ -193,3 +193,124 @@ def walk_blocks(project):
             for b in thread:
                 for x in walk(b):
                     yield o, x
+    for f in project.get("functions", []):
+        for thread in json.loads(f["content"]):
+            for b in thread:
+                for x in walk(b):
+                    yield f, x
+
+
+# ---------------------------------------------------------------- 함수
+FUNCS = []
+LOOP_TYPES = {"repeat_basic", "repeat_inf", "repeat_while_true", "message_cast_wait", "wait_second",
+              "ask_and_wait", "append_row_to_table"}
+
+
+class Func:
+    """엔트리 함수 하나.
+
+    value=True 이면 '값을 돌려주는 함수'(function_create_value). 값 함수는 반복 없이 한 번에 끝나야 한다:
+    반복이 있으면 엔트리가 다음 프레임에 이어서 돌리는데, 그 사이 같은 값 함수가 또 불리면 전역 변수를 함께 쓰게 된다.
+    counters 는 함수의 지역 변수 (엔트리 지역 변수는 빈 문자열을 0 으로 돌려주므로 숫자 세기에만 쓴다).
+    """
+
+    def __init__(self, title, params=(), value=False, counters=()):
+        self.id = gen_id()
+        self.title = title
+        self.value = value
+        self.params = list(params)
+        self.ptype = {p: f"stringParam_{gen_id()}" for p in self.params}
+        self.locals = {c: f"{self.id}_{gen_id()}" for c in counters}
+        self.body = None
+        self.ret = None
+        FUNCS.append(self)
+
+    # 함수 안에서 쓰는 블록
+    def p(self, name):
+        return blk(self.ptype[name], [])
+
+    def get(self, name):
+        return blk("get_func_variable", [self.locals[name], None])
+
+    def set(self, name, v):
+        return blk("set_func_variable", [self.locals[name], w(v), None])
+
+    def inc(self, name, n=1):
+        return self.set(name, plus(self.get(name), n))
+
+    # 부르는 블록
+    def __call__(self, *args):
+        assert len(args) == len(self.params), (self.title, args)
+        params = [w(a) for a in args]
+        if not self.value:
+            params.append(None)
+        return blk(f"func_{self.id}", params)
+
+    def define(self, *body, ret=None):
+        assert (ret is not None) == self.value, self.title
+        if self.value:
+            normal_calls = {f"func_{f.id}" for f in FUNCS if not f.value}
+            bad = [b["type"] for b in _walk_list(body) if b["type"] in LOOP_TYPES | normal_calls]
+            assert not bad, f"값 함수 '{self.title}' 안에 반복/기다리기/보통 함수가 있음: {bad}"
+        self.body = list(body)
+        self.ret = ret
+        return self
+
+    def to_json(self):
+        assert self.body is not None, f"함수 '{self.title}' 를 정의하지 않음"
+        fields = [("label", self.title)]
+        for p in self.params:
+            if len(self.params) > 1:
+                fields.append(("label", f"{p}:"))
+            fields.append(("string", p))
+
+        def chain(i):
+            if i == len(fields):
+                return None
+            kind, val = fields[i]
+            if kind == "label":
+                return {"id": gen_id(), "type": "function_field_label", "params": [val, chain(i + 1)], "statements": []}
+            param = {"id": gen_id(), "type": self.ptype[val], "params": [], "statements": []}
+            return {"id": gen_id(), "type": "function_field_string", "params": [param, chain(i + 1)], "statements": []}
+
+        if self.value:
+            head = {"id": gen_id(), "type": "function_create_value",
+                    "params": [chain(0), None, None, _place(w(self.ret))], "statements": [self.body]}
+        else:
+            head = {"id": gen_id(), "type": "function_create", "params": [chain(0), None], "statements": [self.body]}
+        head["x"], head["y"] = 40, 40
+        return {
+            "id": self.id,
+            "type": "value" if self.value else "normal",
+            "content": json.dumps([[head]], ensure_ascii=False),
+            "useLocalVariables": bool(self.locals),
+            "localVariables": [{"name": n, "value": 0, "id": lid} for n, lid in self.locals.items()],
+        }
+
+
+def _walk_list(blocks):
+    for b in blocks:
+        yield b
+        for p in b["params"]:
+            if isinstance(p, dict):
+                yield from _walk_list([p])
+        for st in b.get("statements", []):
+            yield from _walk_list(st)
+
+
+# ---------------------------------------------------------------- 테이블
+TABLES = Registry()
+
+
+def tcount(table): return blk("get_table_count", [TABLES[table], "ROW"])                # 머리글 줄까지 센 줄 수
+def tget(table, row, col): return blk("get_value_from_table", [TABLES[table], w(row), w(col)])  # row 1 = 머리글
+def tlookup(table, col, value, ret): return blk("get_value_v_lookup", [TABLES[table], w(col), w(value), w(ret)])
+def TAPPEND(table): return blk("append_row_to_table", [TABLES[table], "ROW", None])
+def TSET(table, row, col, value): return blk("set_value_from_table", [TABLES[table], w(row), w(col), w(value), None])
+def TDELETE(table, row): return blk("delete_row_from_table", [TABLES[table], w(row), "ROW", None])
+def TOPEN(table): return blk("open_table", [TABLES[table], None])
+
+
+def has_key(table, value):
+    """테이블 첫 칸에 value 가 있는지 (VLOOKUP 으로 첫 칸을 다시 꺼내 비교)."""
+    return eq(tlookup(table, 1, value, 1), value)
