@@ -279,6 +279,23 @@ class StructureTest(unittest.TestCase):
             for row in tables[name]["data"]:
                 self.assertFalse(re.fullmatch(r"\s*-?[0-9.]+\s*", str(row[0])), (name, row))
 
+    def test_table_blocks_only_in_gateway_functions(self):
+        """엔트리 웹에서 .ent 를 불러올 때 테이블이 빠질 수 있다. 그때 손으로 다시 고를 블록이 적도록
+        테이블 블록은 테이블마다 정해진 창구 함수 안에만 하나씩 둔다."""
+        gateways = {"표-주제": {"주제표 찾기"}, "표-단어뜻": {"뜻표 찾기"}, "표-일상대화": {"일상표 찾기"},
+                    "표-감정어": {"감정표 찾기"}, "표-먼저묻기": {"질문표 줄 수", "질문표 칸"},
+                    "대화기록표": {"기록표 줄 수", "기록표 칸", "기록표 칸 바꾸기", "기록표 줄 더하기", "기록표 줄 지우기",
+                               "기록표 열기"}}
+        names = {t["id"]: t["name"] for t in PROJECT["tables"]}
+        found = {}
+        for owner, b in walk_blocks(PROJECT):
+            if b["params"] and isinstance(b["params"][0], str) and b["params"][0] in names:
+                self.assertIn("content", owner, f"오브젝트 스크립트에 테이블 블록 {b['type']}")
+                fname = func_fields(owner)[1][0][1]
+                found.setdefault(names[b["params"][0]], []).append(fname)
+        for table, funcs in found.items():
+            self.assertEqual(sorted(funcs), sorted(gateways[table]), table)
+
     def test_functions(self):
         calls = {b["type"][5:] for _o, b in walk_blocks(PROJECT) if b["type"].startswith("func_")}
         for f in PROJECT["functions"]:
