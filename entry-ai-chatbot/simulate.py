@@ -266,7 +266,9 @@ class Session:
         # 테이블 (실행할 때마다 작품에 저장된 내용으로 시작한다)
         self.tables, self.table_names, self.opened_tables = {}, {}, []
         for t in project.get("tables", []):
-            rows = [[entry_to_number(x) for x in r] + [0] * (len(t["fields"]) - len(r)) for r in t["data"]]
+            # 줄은 [값…] 또는 엔트리 저장 형식 {key, value: [값…]} (dmetTable.from)
+            data = [r["value"] if isinstance(r, dict) else r for r in t["data"]]
+            rows = [[entry_to_number(x) for x in r] + [0] * (len(t["fields"]) - len(r)) for r in data]
             self.tables[t["id"]] = {"name": t["name"], "fields": list(t["fields"]), "rows": rows}
             self.table_names[t["name"]] = t["id"]
         self.print_msg = next((m["id"] for m in project["messages"] if m["name"] == "채팅에 출력"), None)

@@ -243,10 +243,17 @@ class StructureTest(unittest.TestCase):
             self.assertTrue(list_data(name) and all(list_data(name)), name)
 
     def test_tables(self):
-        tables = {t["name"]: t for t in PROJECT["tables"]}
+        # 엔트리 저장 형식 (DataTableSource.toJSON): data 는 {key, value}, origin 은 원본 줄
+        for t in PROJECT["tables"]:
+            self.assertEqual([r["value"] for r in t["data"]], t["origin"], t["name"])
+            keys = [r["key"] for r in t["data"]]
+            self.assertEqual(len(keys), len(set(keys)))
+            self.assertFalse(any("_" in k for k in keys))  # dmetTable 은 '_' 로 줄 키와 칸을 나눈다
+        tables = {t["name"]: dict(t, data=t["origin"]) for t in PROJECT["tables"]}
         self.assertEqual(set(tables), {"표-주제", "표-단어뜻", "표-일상대화", "표-감정어", "표-먼저묻기", "대화기록표"})
         self.assertEqual(tables["대화기록표"]["fields"], LOG_FIELDS)
-        self.assertEqual(tables["대화기록표"]["data"], [])
+        # 빈 표는 엔트리 화면에서 만들 수 없는 모양이라 안내 줄 하나를 넣어 두고, 실행하면 맨 먼저 비운다
+        self.assertEqual(len(tables["대화기록표"]["data"]), 1)
         for name, t in tables.items():
             self.assertLessEqual(len(t["data"]), 3000, name)  # 엔트리 테이블 최대 행 수
             for row in t["data"]:
@@ -284,6 +291,8 @@ class StructureTest(unittest.TestCase):
             for v in f["localVariables"]:
                 self.assertTrue(v["id"].startswith(f["id"] + "_"), v)
             if f["type"] == "value":
+                # 몸통이 빈 값 함수는 엔트리에서 정의 블록 자체를 실행하느라 한 프레임 늦게(Promise로) 값을 준다
+                self.assertTrue(head["statements"][0], f"몸통이 빈 값 함수 {fields[0][1]}")
                 # 값 함수 안에서 반복·기다리기를 쓰면 여러 프레임에 걸쳐 돌아 값이 늦게(Promise로) 나온다
                 types = {b["type"] for o, b in walk_blocks(PROJECT) if o is f}
                 self.assertFalse(types & {"repeat_basic", "repeat_inf", "repeat_while_true", "wait_second",
@@ -580,6 +589,10 @@ class RecordTableTest(unittest.TestCase):
         self.assertIn("모두 10줄", r[5])
         s = chat({}, "r5", ["기록 검색: 없는말"])
         self.assertIn("기록은 없어요", bot_replies(s)[0])
+
+    def test_placeholder_row_is_cleared_at_start(self):
+        s = chat({}, "r7", [])
+        self.assertEqual(self.rows(s), [])
 
     def test_new_chat_clears_table(self):
         s = chat({}, "r6", ["안녕", "오늘 재밌었어", "새 대화"])

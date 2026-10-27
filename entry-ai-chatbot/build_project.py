@@ -173,8 +173,11 @@ TAIL.define(
            [setv("자른글", sub(TAIL.p("글"), 1, minus(slen(TAIL.p("글")), TAIL.p("개수"))))],
            [setv("자른글", "")]),
     ret=V("자른글"))
-END.define(ret=sub(join("    ", END.p("글")), minus(plus(slen(END.p("글")), 4), minus(END.p("개수"), 1)),
-                   plus(slen(END.p("글")), 4)))
+# 엔트리에서 몸통이 빈 값 함수는 한 프레임 늦게(비동기로) 값을 돌려주므로, 몸통에 블록을 하나 둔다.
+END.define(
+    setv("끝조각", sub(join("    ", END.p("글")), minus(plus(slen(END.p("글")), 4), minus(END.p("개수"), 1)),
+                       plus(slen(END.p("글")), 4))),
+    ret=V("끝조각"))
 PAD2.define(
     IFELSE(lt(PAD2.p("수"), 10), [setv("두자리", join("0", PAD2.p("수")))], [setv("두자리", PAD2.p("수"))]),
     ret=V("두자리"))
@@ -1205,7 +1208,20 @@ def lst(name, data=(), realtime=False):
 
 
 def table(name, fields, rows):
-    return {"id": TABLES[name], "name": name, "fields": list(fields), "data": [list(r) for r in rows], "chart": []}
+    """엔트리가 작품을 저장할 때 쓰는 모양 그대로 만든다 (DataTableSource.toJSON):
+    data 는 {key, value} 줄, origin 은 정지했을 때 되돌아갈 원본 줄."""
+    rows = [list(r) for r in rows]
+    return {
+        "id": TABLES[name], "name": name, "fields": list(fields),
+        "data": [{"key": f"{TABLES[name]}r{i}", "value": r} for i, r in enumerate(rows, 1)],
+        "origin": rows, "chart": [], "object": None, "isCloud": False, "cloudDate": None,
+        "updated": time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime()),
+    }
+
+
+# 대화기록표는 실행하면 맨 먼저 비우지만, 빈 표(데이터 0줄)는 엔트리 화면에서 만들 수 없는 모양이라
+# 안내 줄 하나를 넣어 둔다. (정지하면 테이블은 이 상태로 돌아간다)
+LOG_PLACEHOLDER = [0, "-", "-", "안내", "-", "-", "대화를 시작하면 이 표에 한 줄씩 쌓여요"]
 
 
 def text_box(name, text, x, y, size, colour, bg="transparent", align=0, bold=False, font=FONT, script=(),
@@ -1254,7 +1270,7 @@ def build():
         table(T_TALK, *KNOW["일상대화"]),
         table(T_FEEL, KNOW["감정어"][0], [(w_, int(s)) for w_, s in KNOW["감정어"][1]]),
         table(T_ASK, *KNOW["먼저묻기"]),
-        table(T_LOG, LOG_FIELDS, []),
+        table(T_LOG, LOG_FIELDS, [LOG_PLACEHOLDER]),
     ]
     unknown = set(TABLES) - {t["name"] for t in tables}
     assert not unknown, f"만들지 않은 테이블을 블록에서 씀: {unknown}"
