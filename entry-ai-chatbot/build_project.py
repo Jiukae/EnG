@@ -7,10 +7,12 @@
 구성
 - 함수: 엔봇의 생각은 모두 엔트리 '함수'로 만든다. 값을 돌려주는 함수(조사 붙이기, 앞뒤 공백 지우기 …)는
   반복 없이 한 번에 끝나서 대답이 빨라지고, 같은 블록 묶음을 여러 번 쓰지 않아도 된다.
-- 테이블: 지식(주제, 단어 뜻, 일상 대화, 감정어, 먼저 물을 질문)은 knowledge/*.csv 를 테이블로 넣고
-  'VLOOKUP' 블록으로 한 번에 찾는다. 대화는 '대화기록표' 테이블에 날짜·시각·누가·주제·감정·내용으로 쌓는다.
-- 사용자별 저장: 엔트리 테이블은 정지하면 처음 내용으로 돌아가고 서버에 저장되지 않으므로,
-  사용자별 기록은 실시간 리스트(대화기록, 기억저장소)에 저장하고, 시작할 때 대화기록표로 다시 펼친다.
+- 지식(주제, 단어 뜻, 일상 대화, 감정어, 먼저 물을 질문)은 knowledge/*.csv 를 정렬된 리스트로 넣고
+  '지식 찾기' 함수가 이진 탐색으로 한 번에 찾는다. (엔트리 웹에서 .ent 를 불러오면 테이블은 빠지고
+  리스트는 그대로 들어오기 때문에, 대화에 꼭 필요한 데이터는 리스트에 둔다.)
+- 대화 기록은 리스트 '기록-…' 에 날짜·시각·누가·주제·감정·내용으로 쌓고, 검색·통계도 여기서 한다.
+  '기록표 켜기' 를 하면 엔트리 테이블 '대화기록표' 에도 똑같이 맞춰 두고 표로 보여 준다.
+- 사용자별 저장: 실시간 리스트(대화기록, 기억저장소)에 저장하고, 시작할 때 기록 리스트로 다시 펼친다.
 
 엔봇이 대답을 만드는 순서 (함수 '답변 만들기')
   문장 분석 → 명령 → 직전에 물어본 것의 대답 → 이야기 속 사실 → 기억 → 단어 뜻·일상 대화·모르는 것 배우기
@@ -21,6 +23,7 @@
 import csv
 import io
 import json
+import math
 import os
 import re
 import tarfile
@@ -30,8 +33,8 @@ import data as D
 from dsl import (AND, ASK, BG, BREAK, CAST, ELIF_CHAIN, FG, FUNCS, HIDE, HIDE_ANSWER, IF, IFELSE, LISTS, MSGS,
                  NOT, OR, REPEAT, SCAN, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNSAY, UNTIL, V, VARS, WAIT,
                  WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, contains, count, date,
-                 empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, nickname,
-                 pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount, tget, tlookup,
+                 empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, nickname, quot,
+                 pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount,
                  translate, username, walk_blocks)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,6 +49,7 @@ SHOW_HISTORY = 8        # 다시 접속했을 때 화면에 보여 줄 지난 �
 MAX_HISTORY_LINES = 40  # 사용자마다 서버에 남기는 대화 줄 수
 MAX_LINE_LEN = 140      # 서버에 남기는 한 줄의 최대 길이 (날짜·시각·주제·감정 포함)
 MAX_MEMORIES = 50       # 사용자마다 기억하는 것의 수
+MAX_RECORDS = 200       # 기록 리스트(와 대화기록표)에 남기는 줄 수
 
 # 대화기록표 칸 번호
 C_NO, C_DATE, C_TIME, C_WHO, C_TOPIC, C_FEEL, C_TEXT = range(1, 8)
@@ -69,11 +73,26 @@ def read_csv(name):
     return rows[0], [r for r in rows[1:] if r and r[0].strip()]
 
 
-# knowledge/<테이블 이름>.csv — 엔트리 테이블 탭에서 그대로 올릴 수 있는 파일
+# knowledge/<이름>.csv — 엔봇의 지식. 빌드할 때 리스트로 들어간다.
+# (엔트리 웹에서 .ent 를 불러오면 테이블은 빠지고 리스트는 그대로 들어오므로, 대화에 꼭 필요한 지식은 리스트에 둔다)
 T_TOPIC, T_DEF, T_TALK, T_FEEL, T_ASK, T_LOG = "표-주제", "표-단어뜻", "표-일상대화", "표-감정어", "표-먼저묻기", "대화기록표"
 KNOW = {name: read_csv(name) for name in [T_TOPIC, T_DEF, T_TALK, T_FEEL, T_ASK, T_LOG]}
 TABLE_ROWS = {name: rows for name, (_fields, rows) in KNOW.items()}
 assert KNOW[T_LOG][0] == LOG_FIELDS
+KIND = {T_TOPIC: "주", T_DEF: "뜻", T_TALK: "말", T_FEEL: "감"}  # 리스트 '지식키' 의 앞머리
+
+
+def knowledge_lists():
+    """'주|학교' 같은 키를 자바스크립트 글자 순서(UTF-16)로 정렬한 지식키 / 지식값 리스트."""
+    items = [(f"{kind}|{r[0]}", r[1]) for table, kind in KIND.items() for r in KNOW[table][1]]
+    items.sort(key=lambda kv: kv[0].encode("utf-16-be"))
+    keys = [k for k, _ in items]
+    assert len(keys) == len(set(keys)), "지식 키가 겹침"
+    return keys, [v for _, v in items]
+
+
+KNOW_KEYS, KNOW_VALUES = knowledge_lists()
+SEARCH_STEPS = math.ceil(math.log2(len(KNOW_KEYS))) + 1  # 이진 탐색 단계 수
 
 # ================================================================ 함수 선언
 # 값 함수 (반복 없이 바로 값을 돌려준다)
@@ -107,7 +126,7 @@ R_TALK = Func("대답: 뜻과 일상 대화")
 R_FEEL = Func("대답: 감정과 주제")
 R_LAST = Func("대답: 이어 가기")
 LOG = Func("기록하기", ["누가", "내용"])
-LOGROW = Func("기록표에 줄 넣기", ["날짜", "시각", "누가", "주제", "감정", "내용"])
+LOGROW = Func("기록 줄 넣기", ["날짜", "시각", "누가", "주제", "감정", "내용"])
 PARSELINE = Func("기록 줄 풀기", ["줄"])
 SAVELOG = Func("기록 저장")
 SAVEMEM = Func("기억 저장")
@@ -116,45 +135,61 @@ SLOT_MEM = Func("내 기억 칸 찾기")
 LOAD = Func("데이터 불러오기", counters=["줄번호"])
 SEARCH = Func("기록 검색", ["낱말"], counters=["찾은수"])
 STATS = Func("기록 통계", counters=["내말", "봇말", "좋음", "나쁨", "보통", "오늘"])
-CLEARLOG = Func("기록표 비우기")
+CLEARLOG = Func("기록 비우기")
 
-# ================================================================ 테이블 창구 함수
-# 테이블 블록은 이 함수들 안에만 둔다. 엔트리 웹에서 .ent 를 불러올 때 테이블이 빠지면
-# knowledge/*.csv 를 테이블로 올린 뒤, 이 함수들 안의 테이블 칸(▼)만 다시 고르면 된다.
-FIND_IN = {
-    T_TOPIC: Func("주제표 찾기", ["낱말", "칸"], value=True),
-    T_DEF: Func("뜻표 찾기", ["낱말", "칸"], value=True),
-    T_TALK: Func("일상표 찾기", ["낱말", "칸"], value=True),
-    T_FEEL: Func("감정표 찾기", ["낱말", "칸"], value=True),
-}
-ASK_COUNT = Func("질문표 줄 수", value=True)
-ASK_GET = Func("질문표 칸", ["줄", "칸"], value=True)
-LOG_COUNT = Func("기록표 줄 수", value=True)
-LOG_GET = Func("기록표 칸", ["줄", "칸"], value=True)
-LOG_SET = Func("기록표 칸 바꾸기", ["줄", "칸", "값"])
-LOG_ADD = Func("기록표 줄 더하기")
-LOG_DEL = Func("기록표 줄 지우기", ["줄"])
-LOG_OPEN = Func("기록표 열기")
-for _t, _f in FIND_IN.items():
-    # VLOOKUP: 첫 칸이 낱말인 줄의 '칸' 번째 값 (없으면 빈 값)
-    _f.define(setv("표값", tlookup(_t, 1, _f.p("낱말"), _f.p("칸"))), ret=V("표값"))
-ASK_COUNT.define(setv("표값", tcount(T_ASK)), ret=V("표값"))
-ASK_GET.define(setv("표값", tget(T_ASK, ASK_GET.p("줄"), ASK_GET.p("칸"))), ret=V("표값"))
-LOG_COUNT.define(setv("표값", tcount(T_LOG)), ret=V("표값"))
-LOG_GET.define(setv("표값", tget(T_LOG, LOG_GET.p("줄"), LOG_GET.p("칸"))), ret=V("표값"))
-LOG_SET.define(TSET(T_LOG, LOG_SET.p("줄"), LOG_SET.p("칸"), LOG_SET.p("값")))
-LOG_ADD.define(TAPPEND(T_LOG))
-LOG_DEL.define(TDELETE(T_LOG, LOG_DEL.p("줄")))
-LOG_OPEN.define(TOPEN(T_LOG))
+# ================================================================ 지식 찾기 · 대화기록표
+KNOWLEDGE = Func("지식 찾기", ["종류", "낱말"], value=True)
+RECVAL = Func("기록 칸 값", ["줄", "칸"], value=True)
+TABLE_SYNC = Func("기록표 맞추기")
+TABLE_OPEN = Func("기록표 열기")
+# 정렬된 '지식키' 리스트에서 '종류|낱말' 을 이진 탐색으로 찾는다 (반복 블록 없이 펼쳐서 한 번에 계산된다)
+KNOWLEDGE.define(
+    setv("찾을키", join(KNOWLEDGE.p("종류"), "|", KNOWLEDGE.p("낱말"))),
+    setv("아래", 1), setv("위", llen("지식키")),
+    *[IF(lt(V("아래"), V("위")),
+         setv("가운데", quot(plus(V("아래"), V("위")), 2)),
+         IFELSE(lt(item("지식키", V("가운데")), V("찾을키")),
+                [setv("아래", plus(V("가운데"), 1))], [setv("위", V("가운데"))]))
+      for _ in range(SEARCH_STEPS)],
+    setv("찾은지식", ""),
+    IF(eq(item("지식키", V("아래")), V("찾을키")), setv("찾은지식", item("지식값", V("아래")))),
+    ret=V("찾은지식"))
+
+# 대화 기록은 리스트 '기록-…' 에 쌓는다. 칸 순서는 대화기록표와 같다 (1 번호, 2 날짜, … 7 내용)
+REC = {C_NO: "기록-번호", C_DATE: "기록-날짜", C_TIME: "기록-시각", C_WHO: "기록-누가", C_TOPIC: "기록-주제", C_FEEL: "기록-감정",
+       C_TEXT: "기록-내용"}
+rec = lambda col, row: item(REC[col], row)
+RECVAL.define(
+    ELIF_CHAIN(*[(eq(RECVAL.p("칸"), col), [setv("기록칸값", rec(col, RECVAL.p("줄")))]) for col in REC if col != C_NO],
+               otherwise=[setv("기록칸값", rec(C_NO, RECVAL.p("줄")))]),
+    ret=V("기록칸값"))
+# 테이블 블록은 아래 두 함수 안에만 있다 (모두 5개).
+# 엔트리 웹에서 .ent 를 불러오면 테이블이 빠지므로, 기록표는 '기록표 켜기' 를 한 뒤에만 쓴다.
+TABLE_SYNC.define(
+    # 새로 채워야 하면(처음, 새 대화) 표를 모두 비우고, 기록 리스트에서 지운 오래된 줄은 표에서도 지운다
+    IF(eq(V("표다시"), 1),
+       setv("표지울줄", minus(tcount(T_LOG), 1)), setv("표에넣은", 0), setv("표다시", 0)),
+    REPEAT(V("표지울줄"), TDELETE(T_LOG, 2)),
+    setv("표지울줄", 0),
+    # 아직 표에 없는 기록만 한 줄씩 더한다
+    UNTIL(NOT(lt(V("표에넣은"), llen(REC[C_TEXT]))),
+          chg("표에넣은", 1),
+          TAPPEND(T_LOG),
+          setv("표칸", 1),
+          REPEAT(len(LOG_FIELDS),
+                 TSET(T_LOG, plus(V("표에넣은"), 1), V("표칸"), RECVAL(V("표에넣은"), V("표칸"))),
+                 chg("표칸", 1))),
+)
+TABLE_OPEN.define(TOPEN(T_LOG))
 
 
-def lookup(table, value, col):
-    return FIND_IN[table](value, col)
+def lookup(table, value):
+    """지식에서 value 의 값 (없으면 빈 글)."""
+    return KNOWLEDGE(KIND[table], value)
 
 
 def has(table, value):
-    """테이블 첫 칸에 value 가 있는지 (찾은 첫 칸을 다시 꺼내 비교)."""
-    return eq(lookup(table, value, 1), value)
+    return NOT(empty(lookup(table, value)))
 
 
 def BRANCH(cond, *body, guard=None):
@@ -286,7 +321,7 @@ KEYSHOW.define(
 TOPICQ.define(
     setv("주제질문", ""), setv("주제질문대체", 0),
     IF(gt(slen(TOPICQ.p("주제")), 0),
-       IF(has(T_TOPIC, TOPICQ.p("주제")), setv("주제질문", lookup(T_TOPIC, TOPICQ.p("주제"), 2)))),
+       setv("주제질문", lookup(T_TOPIC, TOPICQ.p("주제")))),
     # 이미 알고 있는 걸 묻는 질문이면 다른 말로 바꾼다
     IF(contains(V("주제질문"), "[사실:"),
        setv("괄호A", find(V("주제질문"), "[사실:")), setv("괄호B", find(V("주제질문"), "]")),
@@ -440,12 +475,13 @@ def _feel_lookup(length):
     guard = gt(slen(V("감정낱말")), length - 1) if length else gt(slen(V("감정낱말")), 0)
     return IF(eq(V("낱말점수"), 0), IF(guard,
               setv("감정후보", piece),
-              IF(has(T_FEEL, V("감정후보")), setv("낱말점수", lookup(T_FEEL, V("감정후보"), 2)))))
+              setv("감정값", lookup(T_FEEL, V("감정후보"))),
+              IF(NOT(empty(V("감정값"))), setv("낱말점수", V("감정값")))))
 
 
 def FIND_PIECE(table, text, found, found_len, k, max_pos=30):
-    """글 text 의 조각(긴 것부터)을 table 첫 열에서 VLOOKUP 으로 찾아, 가장 긴 것을 found 에 넣는다.
-    테이블을 처음부터 끝까지 훑지 않으므로 데이터가 늘어나도 빠르기가 그대로다 (글자 수만큼만 돈다)."""
+    """글 text 의 조각(긴 것부터)을 지식에서 찾아, 가장 긴 것을 found 에 넣는다.
+    지식을 처음부터 끝까지 훑지 않으므로 데이터가 늘어나도 빠르기가 그대로다 (글자 수만큼만 돈다)."""
     lengths = {len(r[0]) for r in TABLE_ROWS[table]}
     return [
         setv(found, ""), setv(found_len, 1), setv(k, 1),
@@ -676,13 +712,13 @@ FACTS.define(
 )
 
 STARTER.define(
-    # 아직 모르는 것 하나를 골라 템플릿 뒤에 질문으로 붙인다 (먼저묻기 테이블에서 몇 번 골라 본다).
+    # 아직 모르는 것 하나를 골라 템플릿 뒤에 질문으로 붙인다 (먼저 묻기 리스트에서 몇 번 골라 본다).
     setv("시작찾음", 0),
     *[IF(eq(V("시작찾음"), 0),
-         setv("시작번호", rand(2, ASK_COUNT())),
-         IF(NOT(included("내질문", ASK_GET(V("시작번호"), 1))),
-            setv("템플릿", join(V("템플릿"), " ", ASK_GET(V("시작번호"), 2))),
-            setv("이번대기", join("사실:", ASK_GET(V("시작번호"), 1))),
+         setv("시작번호", rand(1, llen("먼저-키"))),
+         IF(NOT(included("내질문", item("먼저-키", V("시작번호")))),
+            setv("템플릿", join(V("템플릿"), " ", item("먼저-질문", V("시작번호")))),
+            setv("이번대기", join("사실:", item("먼저-키", V("시작번호")))),
             setv("시작찾음", 1))) for _ in range(5)],
     IF(eq(V("시작찾음"), 0), setv("템플릿", join(V("템플릿"), " ", pick("말-이야기거리")))),
 )
@@ -745,10 +781,28 @@ R_CMD.define(
     BRANCH(cmd("계산", "계산해줘", "계산해"), setv("답변", CALC(V("내용")))),
     BRANCH(cmd("기록검색", "검색", "기록찾기"), SEARCH(V("내용"))),
     BRANCH(OR(eq(m(), "기록통계"), eq(m(), "대화통계"), eq(m(), "통계"), eq(m(), "오늘대화")), STATS()),
+    BRANCH(OR(eq(m(), "기록표켜기"), eq(m(), "기록표연결"), eq(m(), "기록표켜줘")),
+           setv("기록표연결", 1), setv("표다시", 1),
+           setv("답변", "기록표를 켰어요. 이제 대화가 엔트리 테이블 '대화기록표'에도 한 줄씩 쌓여요. "
+                      "(데이터 분석 꾸러미에 대화기록표가 연결돼 있어야 해요.)")),
+    BRANCH(eq(m(), "기록표끄기"),
+           setv("기록표연결", 0),
+           setv("답변", "기록표를 껐어요. 대화 기록은 그대로 남아 있어서 검색과 통계는 계속 할 수 있어요.")),
     BRANCH(OR(eq(m(), "기록표"), eq(m(), "기록보기"), eq(m(), "대화기록"), eq(m(), "기록표보기")),
-           LOG_OPEN(),
-           setv("답변", join("대화 기록표를 열었어요. 모두 ", minus(LOG_COUNT(), 1),
-                             "줄이에요. 날짜·시각·누가·주제·감정·내용이 정리돼 있어요. 창을 닫으면 이어서 이야기해요."))),
+           IFELSE(eq(V("기록표연결"), 1),
+                  [TABLE_SYNC(), TABLE_OPEN(),
+                   setv("답변", join("대화 기록표를 열었어요. 모두 ", llen(REC[C_TEXT]),
+                                     "줄이에요. 날짜·시각·누가·주제·감정·내용이 정리돼 있어요. 창을 닫으면 이어서 이야기해요."))],
+                  [IFELSE(eq(llen(REC[C_TEXT]), 0),
+                          [setv("답변", "아직 대화 기록이 없어요.")],
+                          [setv("답변", join("최근 대화 기록이에요. (모두 ", llen(REC[C_TEXT]), "줄)")),
+                           setv("보기k", minus(llen(REC[C_TEXT]), 7)), IF(lt(V("보기k"), 1), setv("보기k", 1)),
+                           UNTIL(gt(V("보기k"), llen(REC[C_TEXT])),
+                                 setv("답변", join(V("답변"), SEP, "· ", HEAD(rec(C_DATE, V("보기k")), 5), " ",
+                                                   rec(C_TIME, V("보기k")), " ", rec(C_WHO, V("보기k")), ": ",
+                                                   rec(C_TEXT, V("보기k")))),
+                                 chg("보기k", 1)),
+                           setv("답변", join(V("답변"), SEP, "엔트리 표로 보려면 '기록표 켜기'라고 말해 주세요."))])])),
     BRANCH(OR(eq(m(), "기억목록"), eq(m(), "기억보기")),
            setv("답변", ""), setv("요약수", 0),
            *SCAN("내질문", lambda: [IF(NOT(starts(item("내질문", V("답k")), "#")),
@@ -851,7 +905,7 @@ _talk_guard = lambda: OR(is_q(), lt(slen(m()), 9), AND(empty(V("주제")), eq(V(
 R_TALK.define(IF(undone(),
     # 단어 뜻 (단어뜻 테이블에서 VLOOKUP)
     BRANCH(AND(is_q(), eq(V("뜻질문"), 1), gt(slen(V("단어")), 0), has(T_DEF, lower(V("단어")))),
-           setv("템플릿", join("{단어은} ", lookup(T_DEF, lower(V("단어")), 2)))),
+           setv("템플릿", join("{단어은} ", lookup(T_DEF, lower(V("단어")))))),
     BRANCH(OR(contains(m(), "몇시"), contains(m(), "지금시간"), contains(m(), "현재시간")),
            setv("답변", join("지금은 ", date("HOUR"), "시 ", date("MINUTE"), "분이에요."))),
     BRANCH(OR(contains(m(), "며칠"), contains(m(), "날짜"), contains(m(), "무슨요일"), contains(m(), "몇월")),
@@ -862,7 +916,7 @@ R_TALK.define(IF(undone(),
     IF(undone(), IF(_talk_guard(),
        *FIND_PIECE(T_TALK, m(), "찾은말", "최장길이", "답k"),
        IF(gt(slen(V("찾은말")), 0),
-          setv("남은답", join(lookup(T_TALK, V("찾은말"), 2), " | ")),
+          setv("남은답", join(lookup(T_TALK, V("찾은말")), " | ")),
           UNTIL(empty(V("남은답")),
                 setv("답위치", find(V("남은답"), " | ")),
                 append("후보답변", TRIM(sub(V("남은답"), 1, minus(V("답위치"), 1)))),
@@ -992,18 +1046,21 @@ REPLY.define(
        setv("지난기분", V("새기분")), SAVEFACT("#기분", V("새기분"))),
 )
 
-# ================================================================ 대화기록표 (테이블)
-_dash = lambda v: v  # 빈 칸은 '-' 로 넣는다 (엔트리 테이블은 빈 칸을 '없음'으로 보고 다시 못 바꾼다)
+# ================================================================ 대화 기록 (리스트 '기록-…')
 LOGROW.define(
-    LOG_ADD(),
-    setv("기록행", LOG_COUNT()),
-    LOG_SET(V("기록행"), C_NO, minus(V("기록행"), 1)),
-    *[IFELSE(empty(LOGROW.p(name)), [LOG_SET(V("기록행"), col, "-")], [LOG_SET(V("기록행"), col, LOGROW.p(name))])
+    # 번호는 오래된 줄을 지워도 바뀌지 않는 일련번호
+    chg("기록번호", 1), append(REC[C_NO], V("기록번호")),
+    # 빈 칸은 '-' 로 넣는다 (대화기록표로 옮길 때 엔트리 테이블은 빈 칸을 '없음'으로 보고 다시 못 바꾼다)
+    *[IFELSE(empty(LOGROW.p(name)), [append(REC[col], "-")], [append(REC[col], LOGROW.p(name))])
       for name, col in [("날짜", C_DATE), ("시각", C_TIME), ("누가", C_WHO), ("주제", C_TOPIC), ("감정", C_FEEL),
                         ("내용", C_TEXT)]],
+    # 오래된 줄은 지운다 (대화기록표에 이미 옮긴 줄이면 표에서도 맨 윗줄을 지우도록 표시)
+    IF(gt(llen(REC[C_TEXT]), MAX_RECORDS),
+       *[remove(REC[col], 1) for col in REC],
+       IF(gt(V("표에넣은"), 0), chg("표에넣은", -1), chg("표지울줄", 1))),
 )
 LOG.define(
-    # 한 줄을 '누가|날짜|시각|주제|감정|내용' 으로 서버용 기록에 붙이고, 대화기록표에도 넣는다.
+    # 한 줄을 '누가|날짜|시각|주제|감정|내용' 으로 서버용 기록에 붙이고, 기록 리스트에도 넣는다.
     setv("기록내용", repl(repl(LOG.p("내용"), SEP, " / "), "|", "/")),
     IFELSE(eq(LOG.p("누가"), "나"), [setv("기록감정", V("감정점수"))], [setv("기록감정", "-")]),
     IFELSE(gt(slen(V("주제")), 0), [setv("기록주제", V("주제"))], [setv("기록주제", "-")]),
@@ -1027,17 +1084,17 @@ PARSELINE.define(
             setv("줄내용", HEAD(V("줄남은"), 3)),
             setv("줄날짜", "-"), setv("줄시각", "-"), setv("줄주제", "-"), setv("줄감정", "-")]),
 )
-CLEARLOG.define(UNTIL(lt(LOG_COUNT(), 2), *[IF(gt(LOG_COUNT(), 1), LOG_DEL(2)) for _ in range(5)]))
+CLEARLOG.define(*[clear(REC[col]) for col in REC], setv("기록번호", 0), setv("표다시", 1))
 
-_row = lambda col: LOG_GET(V("검색k"), col)
+_row = lambda col: rec(col, V("검색k"))
 SEARCH.define(
     IFELSE(empty(SEARCH.p("낱말")),
            [setv("답변", "이렇게 입력해 주세요 → 기록 검색: 고양이")],
            [setv("검색결과", ""), SEARCH.set("찾은수", 0),
-            setv("검색k", LOG_COUNT()),
+            setv("검색k", llen(REC[C_TEXT])),
             # 최근 기록부터 거꾸로 훑는다
-            UNTIL(lt(V("검색k"), 2), *[x for _ in range(3) for x in [
-                IF(NOT(lt(V("검색k"), 2)),
+            UNTIL(lt(V("검색k"), 1), *[x for _ in range(3) for x in [
+                IF(NOT(lt(V("검색k"), 1)),
                    IF(contains(_row(C_TEXT), SEARCH.p("낱말")),
                       SEARCH.inc("찾은수"),
                       IF(lt(SEARCH.get("찾은수"), 6),
@@ -1050,12 +1107,12 @@ SEARCH.define(
                                       V("검색결과")))])]),
 )
 
-_srow = lambda col: LOG_GET(V("통계k"), col)
+_srow = lambda col: rec(col, V("통계k"))
 STATS.define(
     setv("통계주제글", ""), clear("통계주제"), setv("오늘날짜", TODAY()),
-    setv("통계k", 2),
-    UNTIL(gt(V("통계k"), LOG_COUNT()), *[x for _ in range(3) for x in [
-        IF(NOT(gt(V("통계k"), LOG_COUNT())),
+    setv("통계k", 1),
+    UNTIL(gt(V("통계k"), llen(REC[C_TEXT])), *[x for _ in range(3) for x in [
+        IF(NOT(gt(V("통계k"), llen(REC[C_TEXT]))),
            IFELSE(eq(_srow(C_WHO), "나"),
                   [STATS.inc("내말"),
                    ELIF_CHAIN((gt(_srow(C_FEEL), 0), [STATS.inc("좋음")]), (lt(_srow(C_FEEL), 0), [STATS.inc("나쁨")]),
@@ -1072,7 +1129,7 @@ STATS.define(
            setv("주제수", count(V("통계주제글"), join("|", item("통계주제", V("통계j")), "|"))),
            IF(gt(V("주제수"), V("최다수")), setv("최다수", V("주제수")), setv("최다주제", item("통계주제", V("통계j")))),
            chg("통계j", 1)),
-    setv("답변", join("대화 기록 통계예요.", SEP, "· 모두 ", minus(LOG_COUNT(), 1), "줄 (", V("호칭"), "님 ",
+    setv("답변", join("대화 기록 통계예요.", SEP, "· 모두 ", llen(REC[C_TEXT]), "줄 (", V("호칭"), "님 ",
                       STATS.get("내말"), "줄 · 엔봇 ", STATS.get("봇말"), "줄)", SEP, "· 오늘 ", V("호칭"), "님이 한 말: ",
                       STATS.get("오늘"), "줄", SEP, "· 기분: 좋음 ", STATS.get("좋음"), " · 보통 ", STATS.get("보통"),
                       " · 나쁨 ", STATS.get("나쁨"))),
@@ -1141,7 +1198,7 @@ LOAD.define(
                    (eq(item("내질문", V("불러k")), "내 이름"),
                     [IF(starts(item("내답변", V("불러k")), "F:"), setv("호칭", HEAD(item("내답변", V("불러k")), 2)))]))],
           3, k="불러k"),
-    # 지난 대화 → 대화기록표에 펼치고, 마지막 몇 줄은 말풍선으로 보여 준다
+    # 지난 대화 → 기록 리스트에 펼치고, 마지막 몇 줄은 말풍선으로 보여 준다
     setv("전체줄수", count(V("기록블롭"), SEP)),
     IF(gt(V("전체줄수"), 0), PRINT("── 지난 대화 ──", "알림")),
     setv("남은문자열", V("기록블롭")),
@@ -1165,6 +1222,8 @@ def main_script():
         HIDE_ANSWER(),
         clear("화면글"), clear("화면종류"), clear("후보답변"), clear("내질문"), clear("내답변"),
         clear("단어들"), clear("원단어들"),
+        # 대화기록표(테이블)는 '기록표연결' 이 1 일 때만 쓴다 (값은 작품에 저장된 대로 둔다)
+        setv("표에넣은", 0), setv("표지울줄", 0),
         CLEARLOG(),
         CAST("화면 그리기"),
         STATUS("● 연결 중…"),
@@ -1212,6 +1271,7 @@ def main_script():
                  IFELSE(eq(V("기록가림"), 1), [LOG("나", "🔒 (개인정보라서 기록하지 않았어요)")], [LOG("나", V("메시지"))]),
                  PRINT(V("답변"), "봇"),
                  LOG("봇", V("답변")),
+                 IF(eq(V("기록표연결"), 1), TABLE_SYNC()),
                  SAVELOG(),
                  IF(eq(V("기억변경"), 1), SAVEMEM(), setv("기억변경", 0)),
                  STATUS(join("● ", V("호칭"), "님과 대화 중")))),
@@ -1300,12 +1360,7 @@ def build():
     ]
 
     tables = [
-        table(T_TOPIC, *KNOW[T_TOPIC]),
-        table(T_DEF, *KNOW[T_DEF]),
-        table(T_TALK, *KNOW[T_TALK]),
-        table(T_FEEL, KNOW[T_FEEL][0], [(w_, int(s)) for w_, s in KNOW[T_FEEL][1]]),
-        table(T_ASK, *KNOW[T_ASK]),
-        # 대화기록표는 실행하면 맨 먼저 비우지만, 빈 표(데이터 0줄)는 엔트리 화면에서 만들 수 없는 모양이라
+        # 기록표를 켜면 맨 먼저 비우지만, 빈 표(데이터 0줄)는 엔트리 화면에서 만들 수 없는 모양이라
         # 안내 줄 하나를 넣어 둔다. (정지하면 테이블은 이 상태로 돌아간다)
         table(T_LOG, LOG_FIELDS, [[int(r[0])] + r[1:] for r in KNOW[T_LOG][1]]),
     ]
@@ -1313,7 +1368,9 @@ def build():
     assert not unknown, f"만들지 않은 테이블을 블록에서 씀: {unknown}"
     lists = [
         lst("화면글"), lst("화면종류"), lst("단어들"), lst("원단어들"), lst("후보답변"), lst("내질문"), lst("내답변"),
-        lst("통계주제"),
+        lst("통계주제"), *[lst(name) for name in REC.values()],
+        lst("지식키", KNOW_KEYS), lst("지식값", KNOW_VALUES),
+        lst("먼저-키", [r[0] for r in KNOW[T_ASK][1]]), lst("먼저-질문", [r[1] for r in KNOW[T_ASK][1]]),
         lst("불용어", D.STOPWORDS), lst("조사목록", D.JOSA_SUFFIXES), lst("형용사", D.ADJ_STEMS), lst("요일", D.WEEKDAYS),
         lst("예말", D.YES_WORDS), lst("모름말", D.NON_ANSWERS), lst("뒤집는말", D.NEGATORS),
         lst("주제뒤말", D.HA_TAILS), lst("끝말목록", _TAILS),
@@ -1328,7 +1385,7 @@ def build():
          "isCloud": False, "isRealTime": False, "cloudDate": False, "object": None, "x": 134, "y": -70},
         {"name": "대답", "id": gen_id(), "visible": False, "value": "0", "variableType": "answer",
          "isCloud": False, "isRealTime": False, "cloudDate": False, "object": None, "x": 150, "y": -100},
-        *[variable(n) for n in VARS],
+        *[variable(n, {"기록표연결": 0}.get(n, "")) for n in VARS],
         *lists,
     ]
     return {

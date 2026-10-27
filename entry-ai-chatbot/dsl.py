@@ -99,6 +99,7 @@ def plus(a, b): return calc(a, "PLUS", b)
 def minus(a, b): return calc(a, "MINUS", b)
 def rand(a, b): return blk("calc_rand", [None, w(a), None, w(b), None])
 def mod(a, b): return blk("quotient_and_mod", [None, w(a), None, w(b), None, "MOD"])
+def quot(a, b): return blk("quotient_and_mod", [None, w(a), None, w(b), None, "QUOTIENT"])
 
 
 def join(*parts):

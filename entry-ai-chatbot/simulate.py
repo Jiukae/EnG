@@ -132,7 +132,8 @@ def js_strict_equal(a, b):
 
 def js_relational(a, b, op):
     if isinstance(a, str) and isinstance(b, str):
-        x, y = a, b
+        # 자바스크립트는 글자를 UTF-16 코드 단위 순서로 비교한다
+        x, y = a.encode("utf-16-be"), b.encode("utf-16-be")
     else:
         x, y = js_number(a), js_number(b)
         if math.isnan(x) or math.isnan(y):

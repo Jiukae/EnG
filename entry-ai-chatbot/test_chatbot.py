@@ -19,7 +19,7 @@ import tarfile
 import unittest
 
 import data as D
-from build_project import LOG_FIELDS, MAX_HISTORY_LINES, MAX_LINE_LEN
+from build_project import LOG_FIELDS, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS
 from dsl import walk_blocks
 from simulate import EntryError, Session
 
@@ -242,59 +242,62 @@ class StructureTest(unittest.TestCase):
         for name in ["불용어", "조사목록", "뒤집는말"]:
             self.assertTrue(list_data(name) and all(list_data(name)), name)
 
+    def test_knowledge_lists(self):
+        """지식은 테이블이 아니라 리스트에 넣는다 (엔트리 웹에서 .ent 를 불러오면 테이블은 빠진다)."""
+        keys, values = list_data("지식키"), list_data("지식값")
+        self.assertEqual(len(keys), len(values))
+        self.assertGreater(len(keys), 1000)
+        self.assertEqual(len(keys), len(set(keys)))
+        # 이진 탐색을 하므로 자바스크립트 글자 비교(UTF-16 코드 단위) 순서로 정렬돼 있어야 한다
+        self.assertEqual(keys, sorted(keys, key=lambda k: k.encode("utf-16-be")))
+        rows = {}
+        for k, v in zip(keys, values):
+            kind, word = k.split("|", 1)
+            self.assertIn(kind, {"주", "뜻", "말", "감"})
+            # 엔트리 비교 블록은 숫자처럼 보이는 글을 숫자로 바꿔 비교한다 — 키는 숫자처럼 보이면 안 된다
+            self.assertFalse(re.fullmatch(r"\s*-?[0-9.]+\s*", word), k)
+            self.assertTrue(str(v).strip(), k)  # 빈 값이면 '없음'과 구별이 안 된다
+            rows.setdefault(kind, []).append((word, v))
+        for word, _ in rows["뜻"] + rows["말"]:
+            self.assertTrue(word == word.lower() and " " not in word, word)
+        for word, answers in rows["말"]:
+            # 대답이 여러 개면 ' | ' 로 나눠 둔다. 말 속 조각을 찾는 방식이라 키워드는 2~10글자
+            self.assertTrue(2 <= len(word) <= 10, word)
+            self.assertTrue(all(a.strip() for a in answers.split(" | ")), word)
+        for word, score in rows["감"]:
+            self.assertTrue(re.fullmatch(r"-?[1-9]", score), (word, score))
+        self.assertEqual(len(list_data("먼저-키")), len(list_data("먼저-질문")))
+
+    def test_knowledge_search_finds_every_key(self):
+        s = Session(PROJECT, {}, username="k", nickname="k", inputs=[])
+        fid = next(f["id"] for f in PROJECT["functions"] if func_fields(f)[1][0][1] == "지식 찾기")
+        for k, v in zip(list_data("지식키"), list_data("지식값")):
+            kind, word = k.split("|", 1)
+            self.assertEqual(str(s.call_function(fid, [kind, word])), str(v), k)
+        for kind, word in [("주", "없는낱말"), ("뜻", ""), ("말", "가"), ("감", "zzzz"), ("주", "0")]:
+            self.assertEqual(s.call_function(fid, [kind, word]), "", (kind, word))
+
     def test_tables(self):
         # 엔트리 저장 형식 (DataTableSource.toJSON): data 는 {key, value}, origin 은 원본 줄
-        for t in PROJECT["tables"]:
-            self.assertEqual([r["value"] for r in t["data"]], t["origin"], t["name"])
-            keys = [r["key"] for r in t["data"]]
-            self.assertEqual(len(keys), len(set(keys)))
-            self.assertFalse(any("_" in k for k in keys))  # dmetTable 은 '_' 로 줄 키와 칸을 나눈다
-        tables = {t["name"]: dict(t, data=t["origin"]) for t in PROJECT["tables"]}
-        self.assertEqual(set(tables), {"표-주제", "표-단어뜻", "표-일상대화", "표-감정어", "표-먼저묻기", "대화기록표"})
-        self.assertEqual(tables["대화기록표"]["fields"], LOG_FIELDS)
-        # 빈 표는 엔트리 화면에서 만들 수 없는 모양이라 안내 줄 하나를 넣어 두고, 실행하면 맨 먼저 비운다
-        self.assertEqual(len(tables["대화기록표"]["data"]), 1)
-        for name, t in tables.items():
-            self.assertLessEqual(len(t["data"]), 3000, name)  # 엔트리 테이블 최대 행 수
-            for row in t["data"]:
-                self.assertEqual(len(row), len(t["fields"]), (name, row))
-                # 빈 칸은 엔트리에서 '값 없음'이 되어 VLOOKUP·바꾸기가 안 되므로 넣지 않는다
-                self.assertTrue(all(str(c).strip() for c in row), (name, row))
-            keys = [row[0] for row in t["data"]]
-            self.assertEqual(len(keys), len(set(keys)), f"{name} 첫 열(찾는 열)이 겹침")
-            # 첫 열이 다른 표의 머리글과 같으면 VLOOKUP 이 머리글 행을 찾아 버린다
-            self.assertNotIn(t["fields"][0], keys, name)
-        for name in ["표-단어뜻", "표-일상대화"]:
-            for k in [r[0] for r in tables[name]["data"]]:
-                self.assertTrue(k == k.lower() and " " not in k, (name, k))
-        for key, answers in tables["표-일상대화"]["data"]:
-            # 대답이 여러 개면 ' | ' 로 나눠 둔다. 말 속 조각을 찾는 방식이라 키워드는 2~10글자
-            self.assertTrue(2 <= len(key) <= 10, key)
-            self.assertTrue(all(a.strip() for a in answers.split(" | ")), key)
-        for word, score in tables["표-감정어"]["data"]:
-            self.assertIsInstance(score, int)
-            self.assertNotEqual(score, 0, word)
-        # 엔트리는 셀 값을 숫자로 바꿀 수 있으면 숫자로 바꾼다 — 낱말 칸이 숫자처럼 보이면 안 된다
-        for name in ["표-주제", "표-단어뜻", "표-일상대화", "표-감정어"]:
-            for row in tables[name]["data"]:
-                self.assertFalse(re.fullmatch(r"\s*-?[0-9.]+\s*", str(row[0])), (name, row))
+        self.assertEqual([t["name"] for t in PROJECT["tables"]], ["대화기록표"])
+        t = PROJECT["tables"][0]
+        self.assertEqual(t["fields"], LOG_FIELDS)
+        self.assertEqual([r["value"] for r in t["data"]], t["origin"])
+        self.assertFalse(any("_" in r["key"] for r in t["data"]))  # dmetTable 은 '_' 로 줄 키와 칸을 나눈다
+        # 빈 표는 엔트리 화면에서 만들 수 없는 모양이라 안내 줄 하나를 넣어 둔다
+        self.assertEqual(len(t["origin"]), 1)
+        self.assertTrue(all(str(c).strip() for c in t["origin"][0]))
 
-    def test_table_blocks_only_in_gateway_functions(self):
-        """엔트리 웹에서 .ent 를 불러올 때 테이블이 빠질 수 있다. 그때 손으로 다시 고를 블록이 적도록
-        테이블 블록은 테이블마다 정해진 창구 함수 안에만 하나씩 둔다."""
-        gateways = {"표-주제": {"주제표 찾기"}, "표-단어뜻": {"뜻표 찾기"}, "표-일상대화": {"일상표 찾기"},
-                    "표-감정어": {"감정표 찾기"}, "표-먼저묻기": {"질문표 줄 수", "질문표 칸"},
-                    "대화기록표": {"기록표 줄 수", "기록표 칸", "기록표 칸 바꾸기", "기록표 줄 더하기", "기록표 줄 지우기",
-                               "기록표 열기"}}
+    def test_table_blocks_only_in_two_functions(self):
+        """테이블 블록은 '기록표 맞추기', '기록표 열기' 안에만 있다. 기록표를 켜지 않으면 실행되지 않는다."""
         names = {t["id"]: t["name"] for t in PROJECT["tables"]}
-        found = {}
+        found = []
         for owner, b in walk_blocks(PROJECT):
             if b["params"] and isinstance(b["params"][0], str) and b["params"][0] in names:
                 self.assertIn("content", owner, f"오브젝트 스크립트에 테이블 블록 {b['type']}")
-                fname = func_fields(owner)[1][0][1]
-                found.setdefault(names[b["params"][0]], []).append(fname)
-        for table, funcs in found.items():
-            self.assertEqual(sorted(funcs), sorted(gateways[table]), table)
+                found.append(func_fields(owner)[1][0][1])
+        self.assertEqual(sorted(set(found)), ["기록표 맞추기", "기록표 열기"])
+        self.assertLessEqual(len(found), 5)
 
     def test_functions(self):
         calls = {b["type"][5:] for _o, b in walk_blocks(PROJECT) if b["type"].startswith("func_")}
@@ -557,42 +560,54 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(s.obj("상태")["text"], "● 대화 종료")
 
 
-class RecordTableTest(unittest.TestCase):
-    """대화기록표(엔트리 테이블): 번호·날짜·시각·누가·주제·감정·내용"""
+def without_tables(project):
+    """엔트리 웹에서 .ent 를 불러오면 테이블이 빠진다 — 그 상태의 작품."""
+    return dict(project, tables=[])
 
-    @staticmethod
-    def rows(s):
-        return s.table("대화기록표")["rows"]
 
-    def test_every_line_goes_into_the_table(self):
+def records(s):
+    """기록 리스트 → [번호, 날짜, 시각, 누가, 주제, 감정, 내용] 줄들"""
+    cols = [s.lst(f"기록-{c}") for c in LOG_FIELDS]
+    return [[c[i] for c in cols] for i in range(len(cols[-1]))]
+
+
+def as_text(rows):
+    """테이블은 숫자처럼 보이는 값을 숫자로 바꿔 담으므로 글자로 맞춰 비교한다."""
+    return [[str(c) for c in r] for r in rows]
+
+
+class RecordTest(unittest.TestCase):
+    """대화 기록: 리스트 '기록-…' (날짜·시각·누가·주제·감정·내용) + 켜면 대화기록표(엔트리 테이블)"""
+
+    def test_every_line_is_recorded(self):
         s = chat({}, "r1", ["오늘 시험 망쳤어", "고마워"])
-        rows = self.rows(s)
-        self.assertEqual([r[0] for r in rows], [1, 2, 3, 4])
+        rows = records(s)
+        self.assertEqual([str(r[0]) for r in rows], ["1", "2", "3", "4"])
         self.assertEqual([r[3] for r in rows], ["나", "봇", "나", "봇"])
         self.assertEqual(rows[0][4], "시험")
-        self.assertLess(rows[0][5], 0)
+        self.assertLess(float(rows[0][5]), 0)
         self.assertEqual(rows[1][5], "-")
         self.assertEqual(rows[0][6], "오늘 시험 망쳤어")
         self.assertTrue(re.fullmatch(r"\d{4}-\d\d-\d\d", rows[0][1]), rows[0][1])
         self.assertTrue(re.fullmatch(r"\d\d:\d\d", rows[0][2]), rows[0][2])
-        for r in rows:  # 엔트리 테이블은 빈 칸을 '값 없음'으로 다루므로 비워 두지 않는다
+        for r in rows:
             self.assertTrue(all(str(c) != "" for c in r), r)
 
-    def test_table_is_rebuilt_from_server_on_next_visit(self):
+    def test_records_are_rebuilt_from_server_on_next_visit(self):
         server = {}
         first = chat(server, "r2", ["나 고양이 키워", "나비", "오늘 학교에서 발표했어"])
         again = chat(server, "r2", [])
-        self.assertEqual(self.rows(again), self.rows(first))
-        self.assertEqual(self.rows(again)[4][4], "발표")  # '발표했어' 에서 주제 낱말을 찾는다
+        self.assertEqual(records(again), records(first))
+        self.assertEqual(records(again)[4][4], "발표")  # '발표했어' 에서 주제 낱말을 찾는다
 
     def test_old_history_format_is_read(self):
         server = {}
         list_id = next(v["id"] for v in PROJECT["variables"] if v["name"] == "대화기록")
         server[list_id] = ["r3|나: 안녕¶봇: 반가워요¶"]
         s = chat(server, "r3", [])
-        self.assertEqual([(r[3], r[6]) for r in self.rows(s)], [("나", "안녕"), ("봇", "반가워요")])
+        self.assertEqual([(r[3], r[6]) for r in records(s)], [("나", "안녕"), ("봇", "반가워요")])
 
-    def test_search_stats_and_open(self):
+    def test_search_stats_and_text_view(self):
         s = chat({}, "r4", ["나 고양이 키워", "나비", "나비가 밥을 안 먹어", "기록 검색: 나비", "기록 통계", "기록표"])
         r = bot_replies(s)
         self.assertIn("'나비' 기록을", r[3])
@@ -602,20 +617,50 @@ class RecordTableTest(unittest.TestCase):
         self.assertIn("민수님 4줄", r[4])
         self.assertIn("엔봇 4줄", r[4])
         self.assertIn("제일 많이 나온 주제: 고양이", r[4])
-        self.assertEqual(s.opened_tables, ["대화기록표"])
-        self.assertIn("모두 10줄", r[5])
+        # 기록표를 켜지 않았으면 테이블 대신 글로 최근 기록을 보여 준다
+        self.assertEqual(s.opened_tables, [])
+        self.assertIn("최근 대화 기록이에요. (모두 10줄)", r[5])
+        self.assertIn("기록표 켜기", r[5])
         s = chat({}, "r5", ["기록 검색: 없는말"])
         self.assertIn("기록은 없어요", bot_replies(s)[0])
 
-    def test_placeholder_row_is_cleared_at_start(self):
-        s = chat({}, "r7", [])
-        self.assertEqual(self.rows(s), [])
-
-    def test_new_chat_clears_table(self):
+    def test_new_chat_clears_records(self):
         s = chat({}, "r6", ["안녕", "오늘 재밌었어", "새 대화"])
-        self.assertEqual([r[6] for r in self.rows(s)][0], "새 대화")
-        self.assertEqual(len(self.rows(s)), 2)
-        self.assertEqual(self.rows(s)[0][0], 1)
+        self.assertEqual([r[6] for r in records(s)], ["새 대화", records(s)[1][6]])
+        self.assertEqual(len(records(s)), 2)
+
+    def test_works_when_tables_are_missing(self):
+        """엔트리 웹에서 불러와 테이블이 빠져도 기록표를 켜기 전에는 테이블 블록을 쓰지 않는다."""
+        project = without_tables(PROJECT)
+        inputs = ["안녕", "오늘 시험 망쳤어", "수학", "나 고양이 키워", "나비", "블랙홀이 뭐야?", "수수께끼", "ㅋㅋ",
+                  "기록표", "기록 검색: 나비", "기록 통계", "기억 목록", "새 대화", "기록표 끄기", "도움말", "?"]
+        server = {}
+        Session(project, server, username="t1", nickname="민수", inputs=inputs).run()
+        Session(project, server, username="t1", nickname="민수", inputs=["안녕", "기록표"]).run()
+        Session(project, {}, username=None, nickname=None, inputs=inputs).run()
+        with self.assertRaises(EntryError):  # 켜면 테이블이 있어야 한다
+            Session(project, {}, username="t2", nickname="민수", inputs=["기록표 켜기", "안녕"]).run()
+
+    def test_table_mirrors_records_when_turned_on(self):
+        s = chat({}, "r7", ["안녕", "기록표 켜기", "나 고양이 키워", "나비", "기록표"])
+        table = s.table("대화기록표")["rows"]
+        self.assertEqual(as_text(table), as_text(records(s)[:len(table)]))
+        self.assertEqual([r[0] for r in table], list(range(1, len(table) + 1)))
+        self.assertGreaterEqual(len(table), 8)  # '기록표' 명령 앞까지
+        self.assertEqual(s.opened_tables, ["대화기록표"])
+        self.assertIn("대화 기록표를 열었어요", bot_replies(s)[-1])
+        # 안내 줄은 지워진다
+        self.assertNotIn("안내", [r[3] for r in table])
+
+    def test_table_keeps_up_when_old_records_are_trimmed(self):
+        inputs = ["기록표 켜기"] + [f"메시지 {i}" for i in range(MAX_RECORDS // 2 + 5)] + ["새 대화", "안녕"]
+        s = chat({}, "r8", inputs[:-2])
+        self.assertEqual(len(records(s)), MAX_RECORDS)
+        self.assertEqual(as_text(s.table("대화기록표")["rows"]), as_text(records(s)))
+        self.assertEqual(str(records(s)[0][0]), "13")  # 번호는 지워진 줄 다음부터 이어진다
+        s = chat({}, "r9", inputs)
+        self.assertEqual(as_text(s.table("대화기록표")["rows"]), as_text(records(s)))
+        self.assertEqual([str(r[0]) for r in records(s)], ["1", "2", "3", "4"])
 
 
 class SafetyTest(unittest.TestCase):
@@ -624,10 +669,10 @@ class SafetyTest(unittest.TestCase):
         s = chat(server, "p1", ["내 비밀번호는 abc123이야", "기억해: 비번 = 1234", "내 전화번호는 010-1234-5678"])
         for reply in bot_replies(s):
             self.assertIn(reply.replace("민수", "{이름}"), D.PHRASES["말-개인정보"])
-        everything = json.dumps([server, RecordTableTest.rows(s), memory(s)], ensure_ascii=False)
+        everything = json.dumps([server, records(s), memory(s)], ensure_ascii=False)
         for secret in ["abc123", "1234", "5678"]:
             self.assertNotIn(secret, everything)
-        self.assertIn("🔒", RecordTableTest.rows(s)[0][6])
+        self.assertIn("🔒", records(s)[0][6])
 
     def test_crisis_gets_help_numbers(self):
         s = chat({}, "p2", ["요즘 너무 힘들어서 죽고 싶어"])
