@@ -10,6 +10,7 @@
 
 실행:  python3 test_chatbot.py
 """
+import csv
 import io
 import json
 import os
@@ -19,7 +20,7 @@ import tarfile
 import unittest
 
 import data as D
-from build_project import LOG_FIELDS, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS
+from build_project import LOG_FIELDS, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS, dueum_pairs
 from dsl import walk_blocks
 from simulate import EntryError, Session
 
@@ -253,7 +254,7 @@ class StructureTest(unittest.TestCase):
         rows = {}
         for k, v in zip(keys, values):
             kind, word = k.split("|", 1)
-            self.assertIn(kind, {"주", "뜻", "말", "감"})
+            self.assertIn(kind, {"주", "뜻", "말", "감", "두"})
             # 엔트리 비교 블록은 숫자처럼 보이는 글을 숫자로 바꿔 비교한다 — 키는 숫자처럼 보이면 안 된다
             self.assertFalse(re.fullmatch(r"\s*-?[0-9.]+\s*", word), k)
             self.assertTrue(str(v).strip(), k)  # 빈 값이면 '없음'과 구별이 안 된다
@@ -266,6 +267,10 @@ class StructureTest(unittest.TestCase):
             self.assertTrue(all(a.strip() for a in answers.split(" | ")), word)
         for word, score in rows["감"]:
             self.assertTrue(re.fullmatch(r"-?[1-9]", score), (word, score))
+        # 두음법칙: 한 글자 → 한 글자 ('력' → '역', '녀' → '여', '라' → '나')
+        dueum = dict(rows["두"])
+        self.assertEqual((dueum["력"], dueum["녀"], dueum["라"], dueum["룡"]), ("역", "여", "나", "용"))
+        self.assertTrue(all(len(a) == 1 and len(b) == 1 for a, b in rows["두"]))
         self.assertEqual(len(list_data("먼저-키")), len(list_data("먼저-질문")))
 
     def test_knowledge_search_finds_every_key(self):
@@ -633,7 +638,9 @@ class RecordTest(unittest.TestCase):
         """엔트리 웹에서 불러와 테이블이 빠져도 기록표를 켜기 전에는 테이블 블록을 쓰지 않는다."""
         project = without_tables(PROJECT)
         inputs = ["안녕", "오늘 시험 망쳤어", "수학", "나 고양이 키워", "나비", "블랙홀이 뭐야?", "수수께끼", "ㅋㅋ",
-                  "기록표", "기록 검색: 나비", "기록 통계", "기억 목록", "새 대화", "기록표 끄기", "도움말", "?"]
+                  "기록표", "기록 검색: 나비", "기록 통계", "기억 목록", "새 대화", "기록표 끄기", "도움말", "?",
+                  "반말 써", "끝말잇기", "기차", "그만", "가위바위보", "보", "그만", "3 곱하기 4는?", "디데이",
+                  "방금 내가 뭐라고 했어?", "존댓말 써"]
         server = {}
         Session(project, server, username="t1", nickname="민수", inputs=inputs).run()
         Session(project, server, username="t1", nickname="민수", inputs=["안녕", "기록표"]).run()
@@ -663,6 +670,257 @@ class RecordTest(unittest.TestCase):
         self.assertEqual([str(r[0]) for r in records(s)], ["1", "2", "3", "4"])
 
 
+# ------------------------------------------------------------------ 더 똑똑해진 기능
+class Feed:
+    """입력을 하나씩 내주는 목록. 함수가 들어 있으면 그때의 세션 상태를 바꾸고 입력을 돌려준다."""
+    def __init__(self, items):
+        self.items, self.session = list(items), None
+
+    def __bool__(self):
+        return bool(self.items)
+
+    def __len__(self):
+        return len(self.items)
+
+    def pop(self, i):
+        x = self.items.pop(i)
+        return x(self.session) if callable(x) else x
+
+
+def play(inputs, server=None, user="g", seed=0, **kw):
+    feed = Feed(inputs)
+    s = Session(PROJECT, {} if server is None else server, username=user, nickname="민수", inputs=[], seed=seed, **kw)
+    s.inputs, feed.session = feed, s
+    return s.run()
+
+
+def set_vars(text, **values):
+    def f(s):
+        for name, v in values.items():
+            s.vars[s.var_names[name]] = v
+        return text
+    return f
+
+
+def style_function():
+    return next(f["id"] for f in PROJECT["functions"] if func_fields(f)[1][0][1] == "반말로 바꾸기")
+
+
+HONORIFIC = re.compile(r"니다|세요|에요|예요|해요|어요|아요|군요|죠[.!?]| 저는| 제가")
+
+
+class BanmalTest(unittest.TestCase):
+    def test_banmal_on_off_and_saved(self):
+        server = {}
+        s = chat(server, "b1", ["반말 써", "안녕", "오늘 너무 피곤해", "고마워", "반말해"])
+        r = bot_replies(s)
+        self.assertEqual(r[0], "좋아! 이제부터 편하게 말할게. 다시 존댓말이 좋으면 '존댓말 써'라고 해 줘.")
+        for reply in r[1:]:
+            self.assertNotRegex(reply, HONORIFIC)
+            self.assertNotIn("님", reply)
+        self.assertIn("민수야", r[1])
+        self.assertIn("벌써 편하게", r[4])
+        # 다음에 와도 반말 (말투도 기억한다)
+        s = chat(server, "b1", ["안녕", "존댓말 써", "안녕"])
+        self.assertNotRegex(s.transcript_lines()[-5][1], HONORIFIC)  # 환영 인사
+        r = bot_replies(s)
+        self.assertNotRegex(r[0], HONORIFIC)
+        self.assertIn("존댓말로 말할게요", r[1])
+        self.assertIn("민수님", r[2])
+        self.assertEqual(chat(server, "b1", ["존대해 줘"]).var("말투"), "존댓말")
+
+    def test_every_way_to_ask(self):
+        for text in ["반말 써", "반말로 해", "반말해도 돼", "말 놓을게", "편하게 말해 줘", "친구처럼 말해"]:
+            self.assertEqual(chat({}, "b2", [text]).var("말투"), "반말", text)
+        for text in ["존댓말 써", "반말 하지 마", "높임말로 해 줘"]:
+            self.assertEqual(chat({}, "b3", ["반말 써", text]).var("말투"), "존댓말", text)
+
+    def test_conversion(self):
+        s = Session(PROJECT, {}, username="b", nickname="민수", inputs=[]).run()
+        s.vars[s.var_names["호칭"]] = "민수"
+        fid = style_function()
+        cases = {
+            "안녕하세요, 민수님! 저는 엔봇이에요.": "안녕, 민수야! 나는 엔봇이야.",
+            "숙제 다 했어요? 대단해요! 이제 푹 쉬어요.": "숙제 다 했어? 대단해! 이제 푹 쉬어.",
+            "제 이름은 엔봇이에요. 제가 기억할게요!": "내 이름은 엔봇이야. 내가 기억할게!",
+            "민수님은 어떤 음식을 좋아해요?": "민수는 어떤 음식을 좋아해?",
+            "천만에요! 잘 자요, 민수님.": "천만에! 잘 자, 민수.",
+            "네, 알겠습니다. 감사합니다!": "응, 알겠어. 고마워!",
+        }
+        for src, want in cases.items():
+            self.assertEqual(s.call_function(fid, [src]), want)
+        # 엔봇이 하는 모든 말을 반말로 바꿔 봐도 높임말이 남지 않는다
+        texts = [t for v in D.PHRASES.values() for t in v]
+        for name in os.listdir(os.path.join(HERE, "knowledge")):
+            with open(os.path.join(HERE, "knowledge", name), encoding="utf-8") as f:
+                texts += [c for row in csv.reader(f) for c in row[1:] if re.search("[가-힣]", c)]
+        for t in texts:
+            out = s.call_function(fid, [t.replace("{이름}", "민수")])
+            self.assertNotRegex(out, HONORIFIC, t)
+
+
+class SmartTest(unittest.TestCase):
+    def test_math_in_words(self):
+        cases = {"12 곱하기 3은?": "12*3 = 36이에요!", "100 나누기 4는 얼마야": "100/4 = 25예요!",
+                 "3+5는?": "3+5 = 8이에요!", "7 빼기 10은": "7-10 = -3이에요!", "5 나누기 0은?": "0으로는 나눌 수 없어요."}
+        self.assertEqual(bot_replies(chat({}, "s1", list(cases))), list(cases.values()))
+
+    def test_choose(self):
+        cases = {"짜장면이랑 짬뽕 중에 뭐 먹을까": {"짜장면", "짬뽕"}, "피자 아니면 치킨?": {"피자", "치킨"},
+                 "사과, 배, 귤 중에 골라줘": {"사과", "배", "귤"}, "축구 vs 야구": {"축구", "야구"}}
+        for seed in range(6):
+            for (text, options), reply in zip(cases.items(), bot_replies(chat({}, "s2", list(cases), seed=seed))):
+                picked = [o for o in options if re.search(f"(^|[ !…]){o}[!에]", reply)]
+                self.assertEqual(len(picked), 1, (text, reply))
+
+    def test_dice_coin_and_numbers(self):
+        for seed in range(5):
+            r = bot_replies(chat({}, "s3", ["주사위 굴려줘", "동전 던져줘", "1부터 6까지 랜덤", "10에서 20 사이 숫자 골라줘",
+                                            "랜덤 숫자"], seed=seed))
+            self.assertIn(int(re.search(r"(\d)[이가] 나왔어요", r[0]).group(1)), range(1, 7))
+            self.assertRegex(r[1], "^🪙 휙~ [앞뒷]면이 나왔어요!$")
+            self.assertIn(int(re.search(r"🎲 (\d+)!", r[2]).group(1)), range(1, 7))
+            self.assertIn(int(re.search(r"🎲 (\d+)!", r[3]).group(1)), range(10, 21))
+            self.assertIn(int(re.search(r"🎲 (\d+)!", r[4]).group(1)), range(1, 101))
+
+    def test_times_table(self):
+        r = bot_replies(chat({}, "s4", ["구구단 7단", "9단 알려줘", "구구단"]))
+        self.assertTrue(r[0].startswith("7단이에요! 7×1=7 · 7×2=14"))
+        self.assertTrue(r[0].endswith("7×9=63"))
+        self.assertIn("9×9=81", r[1])
+        self.assertRegex(r[2], r"^[2-9]단이에요!")
+
+    def test_recall_what_was_said(self):
+        r = bot_replies(chat({}, "s5", ["구구단 3단", "방금 내가 뭐라고 했어?", "네가 방금 뭐라고 했어?"]))
+        self.assertEqual(r[1], "방금 “구구단 3단”이라고 했어요.")
+        self.assertEqual(r[2], "제가 방금 이렇게 말했어요. “방금 “구구단 3단”이라고 했어요.”")
+        # 반말일 때도 따옴표 속 말은 그대로
+        r = bot_replies(chat({}, "s6", ["안녕하세요", "반말 써", "방금 내가 뭐라고 했지?", "네가 방금 뭐라고 했어?"]))
+        self.assertEqual(r[2], "방금 “반말 써”라고 했어.")
+        self.assertEqual(r[3], "내가 방금 이렇게 말했어. “방금 “반말 써”라고 했어.”")
+
+    def test_dates(self):
+        # 시뮬레이터의 오늘은 2026년 10월 26일 월요일
+        r = bot_replies(chat({}, "s7", ["크리스마스까지 며칠 남았어?", "12월 3일까지 며칠 남았어?", "1월 1일까지 며칠?",
+                                        "어린이날 언제야?", "모레는 무슨 요일이야?", "어제는 며칠이었어?",
+                                        "2월 30일까지 며칠?", "디데이", "내 생일까지 며칠 남았어?", "4월 1일이야",
+                                        "내 생일은 3월 14일이야", "내 생일까지 며칠 남았어?"]))
+        self.assertEqual(r[0], "크리스마스까지 60일 남았어요! (12월 25일)")
+        self.assertEqual(r[1], "12월 3일까지 38일 남았어요!")
+        self.assertEqual(r[2], "1월 1일까지 67일 남았어요!")
+        self.assertEqual(r[3], "어린이날까지 191일 남았어요! (5월 5일)")
+        self.assertEqual(r[4], "모레는 10월 28일 수요일이에요.")
+        self.assertEqual(r[5], "어제는 10월 25일 일요일이에요.")
+        self.assertIn("달력에 없어요", r[6])
+        self.assertTrue(r[7].startswith("다가오는 날은 할로윈이에요! 5일 남았어요. (10월 31일)"))
+        self.assertIn("생일이 언제예요?", r[8])
+        self.assertEqual(r[11], "민수님 생일까지 139일 남았어요! (3월 14일)")
+
+    def test_dates_across_month_and_year(self):
+        def reply(now, text):
+            return bot_replies(Session(PROJECT, {}, username="d", nickname="민수", inputs=[text], now=now).run())[0]
+        import datetime
+        self.assertEqual(reply(datetime.datetime(2026, 12, 31, 9), "내일 무슨 요일이야?"), "내일은 1월 1일 금요일이에요.")
+        self.assertEqual(reply(datetime.datetime(2028, 2, 28, 9), "내일 며칠이야?"), "내일은 2월 29일 화요일이에요.")
+        self.assertEqual(reply(datetime.datetime(2027, 3, 1, 9), "어제 며칠이야?"), "어제는 2월 28일 일요일이에요.")
+        self.assertEqual(reply(datetime.datetime(2026, 12, 31, 9), "새해까지 며칠 남았어?"), "새해까지 1일 남았어요! (1월 1일)")
+        self.assertEqual(reply(datetime.datetime(2026, 12, 25, 9), "크리스마스까지 며칠?"), "오늘이 바로 크리스마스예요! 🎉")
+
+
+def next_letters(reply):
+    m = re.search(r"'(.)'(?: 또는 '(.)')?(?:으로|로) 시작하는 말", reply)
+    return {c for c in m.groups() if c}
+
+
+class WordChainTest(unittest.TestCase):
+    words = list_data("끝말단어")
+
+    def word_for(self, letters, used=()):
+        return next(w for w in self.words if w[0] in letters and w not in used)
+
+    def test_play_several_rounds(self):
+        used = set()
+
+        def answer(s):
+            word = self.word_for(next_letters([t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]), used)
+            used.add(word)
+            return word
+        s = play(["끝말잇기"] + [answer] * 6 + ["그만"], seed=4)
+        r = bot_replies(s)
+        self.assertTrue(r[0].startswith("좋아요, 끝말잇기! 제가 먼저 할게요."))
+        mine = [t for tag, t, _ in s.transcript_lines() if tag == "나"][1:7]
+        for word, reply in zip(mine, r[1:7]):
+            if "이겼어요" in reply:  # 엔봇이 이을 말을 못 찾으면 진다
+                self.assertIn(f"'{word[-1]}'", reply)
+                break
+            bot_word = reply.split("!")[0]
+            self.assertIn(bot_word, self.words)
+            dueum = dict(dueum_pairs()).get(word[-1])
+            self.assertIn(bot_word[0], {word[-1], dueum})
+            self.assertNotIn(bot_word, mine)
+        self.assertIn(r[-1].replace("민수", "{이름}"), D.PHRASES["말-끝말짐"] + ["오늘 이야기 즐거웠어요, {이름}님! 다시 이야기하려면 시작 버튼을 눌러 주세요."])
+        self.assertEqual(str(s.var("대화중")), "1")  # '그만' 은 놀이만 멈춘다
+
+    def test_rules(self):
+        s = play(["끝말잇기", set_vars("사과", 끝말="전"), "사과", "전기", "가", set_vars("역사", 끝말="력"),
+                  set_vars("성냥", 끝말="성"), "그만"])
+        r = bot_replies(s)
+        self.assertEqual(r[1], "앗, '사과'는 '전'으로 시작하지 않아요! 다시 해 볼래요?")
+        self.assertEqual(r[2], r[1])  # 같은 말을 또 해도 놀이는 그대로
+        self.assertRegex(r[3], "^기[가-힣]*! 이번엔 ")
+        self.assertEqual(r[4], "두 글자 이상인 낱말로 말해 주세요!")
+        self.assertRegex(r[5], "^사[가-힣]*! 이번엔 ")  # 두음법칙: '력' 차례에 '역사'
+        self.assertEqual(r[6], "으… '냥'으로 시작하는 말이 생각 안 나요. 민수님이 이겼어요! 🎉")
+        self.assertEqual(r[7], "오늘 이야기 즐거웠어요, 민수님! 다시 이야기하려면 시작 버튼을 눌러 주세요.")
+
+    def test_hint_mentions_dueum(self):
+        # 엔봇이 고를 낱말이 모두 두음법칙 글자('력', '녀'…)로 끝나는 첫 글자를 찾아서 그 글자로 끝나는 말을 한다
+        dueum = dict(dueum_pairs())
+        first = next(c for c in sorted({w[0] for w in self.words})
+                     if all(w[-1] in dueum for w in self.words if w[0] == c))
+        r = bot_replies(play(["끝말잇기", set_vars("가" + first, 끝말="가")]))
+        last = r[-1].split("!")[0][-1]
+        self.assertEqual(next_letters(r[-1]), {last, dueum[last]})
+        self.assertIn(f"'{last}' 또는 '{dueum[last]}'", r[-1])
+
+    def test_used_word(self):
+        def repeat_bot_word(s):
+            word = s.lst("쓴말")[0]
+            s.vars[s.var_names["끝말"]] = word[0]
+            return word
+        s = play(["끝말잇기", repeat_bot_word])
+        self.assertTrue(bot_replies(s)[-1].endswith("이미 나온 말이에요! 다른 말은 없을까요?"))
+
+    def test_sentence_leaves_the_game(self):
+        s = play(["끝말잇기", "오늘 학교에서 축구했어"])
+        self.assertNotIn("시작하지 않아요", bot_replies(s)[-1])
+        self.assertNotEqual(s.var("대기질문"), "끝말잇기")
+
+
+class RockPaperScissorsTest(unittest.TestCase):
+    def test_rounds_and_score(self):
+        for seed in range(4):
+            s = play(["가위바위보", "가위", "바위", "보", "✊", "그만", "안녕"], seed=seed)
+            r = bot_replies(s)
+            self.assertIn("하나를 내 주세요", r[0])
+            me = bot = 0
+            for mine, reply in zip([1, 2, 3, 2], r[1:5]):
+                m = re.match(r"저는 (가위|바위|보)! (.*) \(민수님 (\d+) : 엔봇 (\d+)\) 또 내 주세요!$", reply)
+                self.assertTrue(m, reply)
+                theirs = ["가위", "바위", "보"].index(m.group(1)) + 1
+                result = (mine - theirs) % 3
+                me, bot = me + (result == 1), bot + (result == 2)
+                self.assertEqual((int(m.group(3)), int(m.group(4))), (me, bot))
+                self.assertIn({0: "비겼어요", 1: "민수님이 이겼어요", 2: "제가 이겼어요"}[result], m.group(2))
+            self.assertTrue(r[5].startswith(f"가위바위보 끝! 민수님 {me} : 엔봇 {bot}."))
+            self.assertEqual(str(s.var("대화중")), "1")
+            self.assertNotIn("가위바위보 끝", r[6])
+
+    def test_other_talk_leaves_the_game(self):
+        r = bot_replies(chat({}, "rps", ["가위바위보", "오늘 너무 피곤해"]))
+        self.assertNotIn("저는", r[1])
+
+
 class SafetyTest(unittest.TestCase):
     def test_private_info_is_not_remembered_or_logged(self):
         server = {}
@@ -687,7 +945,9 @@ class RobustnessTest(unittest.TestCase):
         pieces = ["안녕", "기억해:", "잊어줘:", "번역:", "계산:", "=", ":", "¶", "|", " ", "1", "0", "-", "+", "?",
                   "가나다", "abc", "ㅋㅋ", "도움말", "기억 목록", "새 대화", "몇 시", "{이름}", "[사실:x]", "…", "😀",
                   "내", "내 ", "나는", "좋아해", "싫어", "이야", "했어", "봤어", "뭐야", "이름은", "살", "12살",
-                  "고양이", "시험", "때문에", "해서", "몰라", "응", "너는", "a" * 40]
+                  "고양이", "시험", "때문에", "해서", "몰라", "응", "너는", "a" * 40, "반말 써", "존댓말", "끝말잇기",
+                  "가위바위보", "보", "그만", "주사위", "동전 던져", "중에", "아니면", "vs", "곱하기", "나누기", "부터",
+                  "까지", "에서", "사이", "며칠", "월", "일", "디데이", "방금", "뭐라고", "구구단", "단", "내일", "¤"]
         server = {}
         users = ["u1", "u2", "user_3", "4"]
         worst = 0

@@ -33,7 +33,7 @@ import data as D
 from dsl import (AND, ASK, BG, BREAK, CAST, ELIF_CHAIN, FG, FUNCS, HIDE, HIDE_ANSWER, IF, IFELSE, LISTS, MSGS,
                  NOT, OR, REPEAT, SCAN, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNSAY, UNTIL, V, VARS, WAIT,
                  WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, contains, count, date,
-                 empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, nickname, quot,
+                 empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, mod, nickname, quot,
                  pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount,
                  translate, username, walk_blocks)
 
@@ -82,9 +82,26 @@ assert KNOW[T_LOG][0] == LOG_FIELDS
 KIND = {T_TOPIC: "주", T_DEF: "뜻", T_TALK: "말", T_FEEL: "감"}  # 리스트 '지식키' 의 앞머리
 
 
+def dueum_pairs():
+    """두음법칙: 끝말잇기에서 '력'으로 끝나면 '역'으로도 이을 수 있다. (ㄹ→ㅇ/ㄴ, ㄴ→ㅇ)"""
+    pairs = []
+    for jung in range(21):
+        for jong in range(28):
+            syl = lambda cho: chr(0xAC00 + (cho * 21 + jung) * 28 + jong)
+            if jung in (2, 6, 7, 12, 17, 20):   # ㅑ ㅕ ㅖ ㅛ ㅠ ㅣ
+                pairs.append((syl(5), syl(11)))  # ㄹ → ㅇ (력 → 역)
+                if jung != 2:
+                    pairs.append((syl(2), syl(11)))  # ㄴ → ㅇ (녀 → 여)
+            else:
+                pairs.append((syl(5), syl(2)))   # ㄹ → ㄴ (락 → 낙)
+    return pairs
+
+
 def knowledge_lists():
-    """'주|학교' 같은 키를 자바스크립트 글자 순서(UTF-16)로 정렬한 지식키 / 지식값 리스트."""
+    """'주|학교' 같은 키를 자바스크립트 글자 순서(UTF-16)로 정렬한 지식키 / 지식값 리스트.
+    '두|력' → '역' 처럼 두음법칙도 함께 넣는다."""
     items = [(f"{kind}|{r[0]}", r[1]) for table, kind in KIND.items() for r in KNOW[table][1]]
+    items += [(f"두|{a}", b) for a, b in dueum_pairs()]
     items.sort(key=lambda kv: kv[0].encode("utf-16-be"))
     keys = [k for k, _ in items]
     assert len(keys) == len(set(keys)), "지식 키가 겹침"
@@ -93,6 +110,38 @@ def knowledge_lists():
 
 KNOW_KEYS, KNOW_VALUES = knowledge_lists()
 SEARCH_STEPS = math.ceil(math.log2(len(KNOW_KEYS))) + 1  # 이진 탐색 단계 수
+
+
+def banmal_static(text):
+    """'반말로 바꾸기' 함수가 하는 일을 빌드할 때 그대로 해 본다 (호칭 규칙은 빼고)."""
+    for a, b in D.BANMAL_RULES:
+        text = text.replace(a, b)
+    return text
+
+
+def chain_words():
+    """끝말잇기 낱말: 흔한 명사 + 주제·단어 뜻의 한글 낱말 (2~6글자), 자바스크립트 글자 순서로 정렬."""
+    words = set(w for w in D.WORDCHAIN_NOUNS if len(w) >= 2)
+    words |= {r[0] for t in (T_TOPIC, T_DEF) for r in KNOW[t][1] if re.fullmatch(r"[가-힣]{2,6}", r[0])}
+    # 반말로 바꿀 때 망가지는 낱말은 빼 둔다 ('담요!' → '담!')
+    words = {w for w in words if banmal_static(f" {w}! ") == f" {w}! " and banmal_static(f" {w}. ") == f" {w}. "}
+    words = sorted(words, key=lambda w: w.encode("utf-16-be"))
+    dueum = dict(dueum_pairs())
+    firsts = {w[0] for w in words}
+    # 엔봇이 처음 꺼낼 낱말은 이어 말할 수 있는 것 (끝 글자로 시작하는 낱말이 있는 것)만
+    starters = [w for w in words if w[-1] in firsts or dueum.get(w[-1]) in firsts]
+    return words, starters
+
+
+CHAIN_WORDS, CHAIN_STARTERS = chain_words()
+CHAIN_STEPS = math.ceil(math.log2(len(CHAIN_WORDS) + 1)) + 1
+
+
+def josa_static(word, kinds):
+    """빌드할 때 이미 아는 낱말에 붙일 조사 (받침 있으면 kinds[0])."""
+    last = word[-1]
+    has_batchim = "가" <= last <= "힣" and (ord(last) - 0xAC00) % 28 != 0
+    return word + (kinds[0] if has_batchim else kinds[1])
 
 # ================================================================ 함수 선언
 # 값 함수 (반복 없이 바로 값을 돌려준다)
@@ -190,6 +239,10 @@ def lookup(table, value):
 
 def has(table, value):
     return NOT(empty(lookup(table, value)))
+
+
+def lookup_kind(kind, value):
+    return KNOWLEDGE(kind, value)
 
 
 def BRANCH(cond, *body, guard=None):
@@ -731,6 +784,9 @@ HELP = SEP.join([
     "· 모르는 건 물어보고, 알려 주면 배워요",
     "명령어: 기억 목록 · 나에 대해 알아? · 잊어줘: 내 생일",
     "기록표 · 기록 검색: 고양이 · 기록 통계",
+    "놀이: 끝말잇기 · 가위바위보 · 주사위 · 수수께끼 · 퀴즈",
+    "3 더하기 5는? · 크리스마스까지 며칠? · 내일 무슨 요일?",
+    "짜장면이랑 짬뽕 중에 뭐 먹을까? · 반말 써 / 존댓말 써",
     "번역: 문장 · 한국어로: sentence · 계산: 12*3",
     "몇 시야? · 새 대화 · 종료",
 ])
@@ -745,6 +801,15 @@ sensitive = lambda v: OR(*[contains(v, w_) for w_ in D.SENSITIVE])
 R_CMD.define(
     # 위기 신호는 무엇보다 먼저 받아 준다
     BRANCH(OR(*[contains(m(), w_) for w_ in D.CRISIS]), setv("템플릿", pick("말-위기")), setv("새기분", "나쁨")),
+    # 비밀번호·전화번호 같은 개인정보는 기억하지 않는다
+    BRANCH(AND(not_q(), sensitive(m())), setv("템플릿", pick("말-개인정보")), setv("기록가림", 1)),
+    # 말투 바꾸기 ("반말 써", "존댓말 써")
+    BRANCH(OR(*[contains(m(), w_) for w_ in D.BANMAL_OFF]),
+           IFELSE(eq(V("말투"), "존댓말"), [setv("템플릿", "지금도 존댓말로 말하고 있어요! 😊")],
+                  [setv("말투", "존댓말"), setv("말투변경", 1), setv("템플릿", pick("말-반말끄기"))])),
+    BRANCH(OR(*[contains(m(), w_) for w_ in D.BANMAL_ON]),
+           IFELSE(eq(V("말투"), "반말"), [setv("템플릿", "벌써 편하게 말하고 있어요! 😄")],
+                  [setv("말투", "반말"), setv("말투변경", 1), setv("템플릿", pick("말-반말켜기"))])),
     BRANCH(OR(starts(m(), "도움말"), eq(m(), "help"), eq(m(), "?")), setv("답변", HELP)),
     BRANCH(cmd("기억해", "가르치기", "기억"),
            setv("위치", find(V("내용"), "=")),
@@ -779,7 +844,7 @@ R_CMD.define(
                   [setv("답변", "번역할 영어 문장도 같이 입력해 주세요. 예) 한국어로: Nice to meet you")],
                   [setv("답변", join("한국어로는 이렇게 말해요 → ", translate("en", V("내용"), "ko")))])),
     BRANCH(cmd("계산", "계산해줘", "계산해"), setv("답변", CALC(V("내용")))),
-    BRANCH(cmd("기록검색", "검색", "기록찾기"), SEARCH(V("내용"))),
+    BRANCH(cmd("기록검색", "검색", "기록찾기"), setv("말투제외", 1), SEARCH(V("내용"))),
     BRANCH(OR(eq(m(), "기록통계"), eq(m(), "대화통계"), eq(m(), "통계"), eq(m(), "오늘대화")), STATS()),
     BRANCH(OR(eq(m(), "기록표켜기"), eq(m(), "기록표연결"), eq(m(), "기록표켜줘")),
            setv("기록표연결", 1), setv("표다시", 1),
@@ -795,7 +860,8 @@ R_CMD.define(
                                      "줄이에요. 날짜·시각·누가·주제·감정·내용이 정리돼 있어요. 창을 닫으면 이어서 이야기해요."))],
                   [IFELSE(eq(llen(REC[C_TEXT]), 0),
                           [setv("답변", "아직 대화 기록이 없어요.")],
-                          [setv("답변", join("최근 대화 기록이에요. (모두 ", llen(REC[C_TEXT]), "줄)")),
+                          [setv("말투제외", 1),
+                           setv("답변", join("최근 대화 기록이에요. (모두 ", llen(REC[C_TEXT]), "줄)")),
                            setv("보기k", minus(llen(REC[C_TEXT]), 7)), IF(lt(V("보기k"), 1), setv("보기k", 1)),
                            UNTIL(gt(V("보기k"), llen(REC[C_TEXT])),
                                  setv("답변", join(V("답변"), SEP, "· ", HEAD(rec(C_DATE, V("보기k")), 5), " ",
@@ -804,7 +870,7 @@ R_CMD.define(
                                  chg("보기k", 1)),
                            setv("답변", join(V("답변"), SEP, "엔트리 표로 보려면 '기록표 켜기'라고 말해 주세요."))])])),
     BRANCH(OR(eq(m(), "기억목록"), eq(m(), "기억보기")),
-           setv("답변", ""), setv("요약수", 0),
+           setv("답변", ""), setv("요약수", 0), setv("말투제외", 1),
            *SCAN("내질문", lambda: [IF(NOT(starts(item("내질문", V("답k")), "#")),
                                       setv("값", item("내답변", V("답k"))), IF(starts(V("값"), "F:"), setv("값", HEAD(V("값"), 2))),
                                       setv("답변", join(V("답변"), SEP, "· ", item("내질문", V("답k")), " → ", V("값"))),
@@ -815,14 +881,14 @@ R_CMD.define(
     BRANCH(OR(eq(m(), "새대화"), eq(m(), "초기화"), eq(m(), "기록삭제")),
            setv("기록블롭", ""), clear("화면글"), clear("화면종류"), CLEARLOG(),
            setv("답변", "대화 기록을 지웠어요. 새로 시작해요! (기억하고 있는 건 그대로예요.)")),
-    BRANCH(OR(eq(m(), "종료"), eq(m(), "그만"), eq(m(), "끝"), eq(m(), "bye")),
+    BRANCH(OR(eq(m(), "종료"), eq(m(), "bye"),
+              AND(OR(eq(m(), "그만"), eq(m(), "끝")),
+                  NOT(OR(eq(V("지난대기"), "끝말잇기"), eq(V("지난대기"), "가위바위보"))))),
            setv("대화중", 0),
            setv("템플릿", "오늘 이야기 즐거웠어요, {이름}님! 다시 이야기하려면 시작 버튼을 눌러 주세요.")),
 )
 
 R_PENDING.define(
-    # 비밀번호·전화번호 같은 개인정보는 기억하지 않는다
-    BRANCH(AND(not_q(), sensitive(m())), setv("템플릿", pick("말-개인정보")), setv("기록가림", 1)),
     # 직전에 내가 물어본 것에 대한 대답이면 기억한다
     BRANCH(AND(starts(V("지난대기"), "사실:"), not_q(), empty(V("명령")), lt(slen(V("문장")), 26),
                lt(llen("원단어들"), 5), NOT(eq(V("서술종류"), "동사")),
@@ -866,7 +932,7 @@ R_MEMORY.define(IF(undone(),
     IF(gt(V("찾은번호"), 0),
        IFELSE(starts(item("내답변", V("찾은번호")), "F:"), [IF(is_q(), setv("기억응답", 1))], [setv("기억응답", 2)])),
     BRANCH(eq(V("기억응답"), 1), RECALL(item("내질문", V("찾은번호")))),
-    BRANCH(eq(V("기억응답"), 2), setv("답변", item("내답변", V("찾은번호")))),
+    BRANCH(eq(V("기억응답"), 2), setv("말투제외", 1), setv("답변", item("내답변", V("찾은번호")))),
     BRANCH(AND(is_q(), contains(m(), "이름"),
                OR(starts(m(), "이름"), *[eq(item("원단어들", 1), y) for y in D.YOU_WORDS], starts(m(), "네이름"))),
            setv("템플릿", pick("말-봇이름")), guard=gt(llen("원단어들"), 0)),
@@ -1015,8 +1081,365 @@ R_LAST.define(IF(undone(),
     BRANCH(eq(1, 1), setv("템플릿", pick("말-맞장구")), STARTER()),
 ))
 
+# ================================================================ 말투 (반말)
+STYLE = Func("반말로 바꾸기", ["글"], value=True)
+
+
+def _name_rule(suffix, after):
+    """'{호칭}님' + suffix → 호칭에 알맞은 조사 (after 가 '' 면 이름만, '아!' 처럼 끝에 문장 부호가 붙을 수 있다)."""
+    if after == "":
+        to = V("호칭")
+    elif after[-1] in "!,":
+        to = join(JOSA(V("호칭"), after[:-1]), after[-1])
+    else:
+        to = JOSA(V("호칭"), after)
+    return setv("말투글", repl(V("말투글"), join(V("호칭"), suffix), to))
+
+
+STYLE.define(
+    # 앞에 띄어쓰기를 하나 붙여 두고 (' 저는' 처럼 낱말 앞에서만 바꾸려고) 끝에 뗀다
+    setv("말투글", join(" ", STYLE.p("글"))),
+    # '민수님은' → '민수는', '민수님!' → '민수야!' (이름에 맞는 조사를 먼저 고른다)
+    *[_name_rule(a, b) for a, b in D.BANMAL_NAME_RULES],
+    # '이에요' → '이야', '줄래요' → '줄래' … (위에서부터 차례로)
+    *[setv("말투글", repl(V("말투글"), a, b)) for a, b in D.BANMAL_RULES],
+    ret=HEAD(V("말투글"), 1))
+
+# ================================================================ 날짜 계산
+LEAP = Func("윤년", ["해"], value=True)
+MDAYS = Func("달의 날 수", ["해", "월"], value=True)
+DOY = Func("한 해의 몇째 날", ["해", "월", "일"], value=True)
+DAYS = Func("며칠 남았나", ["월", "일"], value=True)
+SHIFTDATE = Func("날짜 옮기기", ["며칠"])
+PARSEMD = Func("월일 읽기", ["글"])
+LEAP.define(
+    setv("윤", 0),
+    IF(eq(mod(LEAP.p("해"), 4), 0), setv("윤", 1),
+       IF(eq(mod(LEAP.p("해"), 100), 0), setv("윤", 0),
+          IF(eq(mod(LEAP.p("해"), 400), 0), setv("윤", 1)))),
+    ret=V("윤"))
+MDAYS.define(
+    setv("달날수", item("월일수", MDAYS.p("월"))),
+    IF(eq(MDAYS.p("월"), 2), setv("달날수", plus(V("달날수"), LEAP(MDAYS.p("해"))))),
+    ret=V("달날수"))
+DOY.define(
+    setv("몇째날", plus(item("월누적", DOY.p("월")), DOY.p("일"))),
+    IF(gt(DOY.p("월"), 2), setv("몇째날", plus(V("몇째날"), LEAP(DOY.p("해"))))),
+    ret=V("몇째날"))
+DAYS.define(
+    # 오늘부터 (올해 또는 내년) 월·일까지 남은 날
+    setv("오늘째", DOY(date("YEAR"), date("MONTH"), date("DAY"))),
+    setv("그날째", DOY(date("YEAR"), DAYS.p("월"), DAYS.p("일"))),
+    IFELSE(NOT(lt(V("그날째"), V("오늘째"))),
+           [setv("남은날", minus(V("그날째"), V("오늘째")))],
+           [setv("남은날", plus(minus(plus(365, LEAP(date("YEAR"))), V("오늘째")),
+                               DOY(plus(date("YEAR"), 1), DAYS.p("월"), DAYS.p("일"))))]),
+    ret=V("남은날"))
+SHIFTDATE.define(
+    # 오늘에서 며칠 옮긴 날 → 옮긴월 · 옮긴일 · 옮긴요일
+    setv("옮긴해", date("YEAR")), setv("옮긴월", date("MONTH")), setv("옮긴일", plus(date("DAY"), SHIFTDATE.p("며칠"))),
+    IF(gt(V("옮긴일"), MDAYS(V("옮긴해"), V("옮긴월"))),
+       setv("옮긴일", minus(V("옮긴일"), MDAYS(V("옮긴해"), V("옮긴월")))), chg("옮긴월", 1),
+       IF(gt(V("옮긴월"), 12), setv("옮긴월", 1), chg("옮긴해", 1))),
+    IF(lt(V("옮긴일"), 1),
+       chg("옮긴월", -1),
+       IF(lt(V("옮긴월"), 1), setv("옮긴월", 12), chg("옮긴해", -1)),
+       setv("옮긴일", plus(V("옮긴일"), MDAYS(V("옮긴해"), V("옮긴월"))))),
+    setv("옮긴요일", item("요일", plus(mod(plus(plus(date("DAY_OF_WEEK"), SHIFTDATE.p("며칠")), 7), 7), 1))),
+)
+_digits = "0123456789"
+# '디데이' 에서 고를 날 (같은 날의 다른 이름은 하나만)
+SPECIAL_NAMES = list(dict.fromkeys({(mo, dy): n for n, mo, dy in reversed(D.SPECIAL_DAYS)}.values()))
+_numeric = lambda v: AND(gt(slen(v), 0), eq(v, minus(v, 0)))
+
+
+def _read_number_before(text, pos, var):
+    """text 의 pos 바로 앞 한두 글자 숫자를 var 에 넣는다 ('12월' → 12)."""
+    return [setv(var, charat(text, minus(pos, 1))),
+            IF(gt(pos, 2), IF(contains(_digits, charat(text, minus(pos, 2))),
+                              setv(var, join(charat(text, minus(pos, 2)), V(var)))))]
+
+
+PARSEMD.define(
+    # 글 속의 'N월 N일' → 파싱월 · 파싱일 (없으면 0)
+    setv("파싱월", 0), setv("파싱일", 0),
+    setv("읽을글", repl(PARSEMD.p("글"), " ", "")),
+    setv("월위치", find(V("읽을글"), "월")),
+    IF(gt(V("월위치"), 1),
+       *_read_number_before(V("읽을글"), V("월위치"), "읽은수"),
+       IF(AND(_numeric(V("읽은수")), gt(V("읽은수"), 0), lt(V("읽은수"), 13)),
+          setv("파싱월", minus(V("읽은수"), 0)),
+          setv("월뒤", HEAD(V("읽을글"), V("월위치"))),
+          setv("일위치", find(V("월뒤"), "일")),
+          IF(gt(V("일위치"), 1),
+             *_read_number_before(V("월뒤"), V("일위치"), "읽은수"),
+             # (2월은 29일까지 받는다)
+             setv("달끝", item("월일수", V("파싱월"))), IF(eq(V("파싱월"), 2), setv("달끝", 29)),
+             IF(AND(_numeric(V("읽은수")), gt(V("읽은수"), 0), NOT(gt(V("읽은수"), V("달끝")))),
+                setv("파싱일", minus(V("읽은수"), 0)))))),
+    IF(eq(V("파싱일"), 0), setv("파싱월", 0)),
+)
+
+# ================================================================ 놀이 (끝말잇기 · 가위바위보)
+WORD_FIND = Func("끝말 찾기", ["글자"], value=True)
+CHAIN_TURN = Func("끝말잇기 받기")
+RPS_TURN = Func("가위바위보 받기")
+R_GAME = Func("대답: 놀이")
+WORD_FIND.define(
+    # 정렬된 '끝말단어' 에서 글자로 시작하는 첫 낱말 자리를 이진 탐색으로 찾고, 아직 안 쓴 낱말 하나를 고른다
+    setv("끝글자", WORD_FIND.p("글자")),
+    setv("아래", 1), setv("위", plus(llen("끝말단어"), 1)),
+    *[IF(lt(V("아래"), V("위")),
+         setv("가운데", quot(plus(V("아래"), V("위")), 2)),
+         IFELSE(lt(item("끝말단어", V("가운데")), V("끝글자")),
+                [setv("아래", plus(V("가운데"), 1))], [setv("위", V("가운데"))]))
+      for _ in range(CHAIN_STEPS)],
+    setv("끝찾음", ""), setv("끝무작위", rand(0, 3)),
+    *[IF(eq(V("끝찾음"), ""), IF(NOT(gt(at, llen("끝말단어"))), IF(starts(item("끝말단어", at), V("끝글자")),
+         IF(NOT(included("쓴말", item("끝말단어", at))), setv("끝찾음", item("끝말단어", at))))))
+      for at in [plus(V("아래"), V("끝무작위")), V("아래"), *[plus(V("아래"), i) for i in range(1, 7)]]],
+    ret=V("끝찾음"))
+_after_quote = lambda word, kind: join("'", word, "'", HEAD(JOSA(word, kind), slen(word)))
+
+
+def _chain_hint():
+    """끝말 → 끝말안내 ('력' 이면 "'력' 또는 '역'으로", 두음법칙 글자도 알려 준다)"""
+    return [setv("끝말안내", _after_quote(V("끝말"), "으로")),
+            setv("끝말두음", lookup_kind("두", V("끝말"))),
+            IF(gt(slen(V("끝말두음")), 0),
+               setv("끝말안내", join("'", V("끝말"), "' 또는 ", _after_quote(V("끝말두음"), "으로"))))]
+
+
+CHAIN_TURN.define(
+    setv("받은말", V("문장")),
+    setv("시작글자", charat(V("받은말"), 1)),
+    setv("끝말두음", lookup_kind("두", V("끝말"))),
+    ELIF_CHAIN(
+        (lt(slen(V("받은말")), 2), [setv("템플릿", "두 글자 이상인 낱말로 말해 주세요! [끝말잇기]")]),
+        (NOT(OR(eq(V("시작글자"), V("끝말")), AND(gt(slen(V("끝말두음")), 0), eq(V("시작글자"), V("끝말두음"))))),
+         [*_chain_hint(),
+          setv("템플릿", join("앗, ", _after_quote(V("받은말"), "은"), " ", V("끝말안내"),
+                              " 시작하지 않아요! 다시 해 볼래요? [끝말잇기]"))]),
+        (included("쓴말", V("받은말")),
+         [setv("템플릿", join(_after_quote(V("받은말"), "은"), " 이미 나온 말이에요! 다른 말은 없을까요? [끝말잇기]"))]),
+        otherwise=[
+            append("쓴말", V("받은말")),
+            setv("이을글자", END(V("받은말"), 1)),
+            setv("엔봇말", WORD_FIND(V("이을글자"))),
+            # 두음법칙: '력' 으로 못 이으면 '역' 으로
+            IF(empty(V("엔봇말")),
+               setv("이을두음", lookup_kind("두", V("이을글자"))),
+               IF(gt(slen(V("이을두음")), 0), setv("엔봇말", WORD_FIND(V("이을두음"))))),
+            IFELSE(empty(V("엔봇말")),
+                   [setv("템플릿", join("으… ", _after_quote(V("이을글자"), "으로"),
+                                        " 시작하는 말이 생각 안 나요. {이름}님이 이겼어요! 🎉"))],
+                   [append("쓴말", V("엔봇말")), setv("끝말", END(V("엔봇말"), 1)), *_chain_hint(),
+                    setv("템플릿", join(V("엔봇말"), "! 이번엔 ", V("끝말안내"), " 시작하는 말이에요. [끝말잇기]"))])]),
+)
+RPS_TURN.define(
+    setv("내가위", 0),
+    IF(OR(contains(m(), "가위"), eq(m(), "찌"), contains(m(), "✌")), setv("내가위", 1)),
+    IF(OR(contains(m(), "바위"), contains(m(), "주먹"), eq(m(), "묵"), contains(m(), "✊")), setv("내가위", 2)),
+    IF(OR(eq(m(), "보"), eq(m(), "보!"), eq(m(), "보."), contains(m(), "보자기"), eq(m(), "빠"), contains(m(), "✋"),
+          contains(m(), "🖐")), setv("내가위", 3)),
+    IF(gt(V("내가위"), 0),
+       setv("봇가위", rand(1, 3)),
+       # (내 것 - 엔봇 것) 을 3 으로 나눈 나머지: 0 비김, 1 내가 이김, 2 엔봇이 이김
+       setv("가위결과", mod(plus(minus(V("내가위"), V("봇가위")), 3), 3)),
+       ELIF_CHAIN(
+           (eq(V("가위결과"), 0), [setv("템플릿", join("저는 ", item("가위바위보", V("봇가위")), "! 비겼어요."))]),
+           (eq(V("가위결과"), 1), [chg("가위내점수", 1),
+                                   setv("템플릿", join("저는 ", item("가위바위보", V("봇가위")), "! {이름}님이 이겼어요! 🎉"))]),
+           otherwise=[chg("가위봇점수", 1),
+                      setv("템플릿", join("저는 ", item("가위바위보", V("봇가위")), "! 제가 이겼어요 😆"))]),
+       # 판이 끝나도 놀이는 이어진다 ('그만' 이라고 할 때까지)
+       setv("템플릿", join(V("템플릿"), " ({이름}님 ", V("가위내점수"), " : 엔봇 ", V("가위봇점수"),
+                           ") 또 내 주세요! [가위바위보]")),
+       setv("처리됨", 1)),
+)
+R_GAME.define(
+    # 끝말잇기 하는 중: 낱말 하나로 말하면 받는다 (문장으로 말하면 놀이를 멈추고 보통 대화로)
+    IF(AND(undone(), eq(V("지난대기"), "끝말잇기")),
+       IFELSE(OR(*[contains(m(), w_) for w_ in ["그만", "졌어", "항복", "몰라", "못하겠", "포기"]]),
+              [setv("템플릿", pick("말-끝말짐")), setv("처리됨", 1)],
+              [IF(eq(llen("원단어들"), 1), CHAIN_TURN(), setv("처리됨", 1))])),
+    IF(AND(undone(), eq(V("지난대기"), "가위바위보"), NOT(contains(m(), "가위바위보"))),
+       IFELSE(OR(*[contains(m(), w_) for w_ in ["그만", "안 할래", "안할래", "끝"]]),
+              [setv("가위승자", "비겼어요!"),
+               IF(gt(V("가위내점수"), V("가위봇점수")), setv("가위승자", "{이름}님이 이겼어요! 🏆")),
+               IF(lt(V("가위내점수"), V("가위봇점수")), setv("가위승자", "제가 이겼네요! 😆")),
+               setv("템플릿", join("가위바위보 끝! {이름}님 ", V("가위내점수"), " : 엔봇 ", V("가위봇점수"), ". ",
+                                   V("가위승자"), " 재밌었어요.")),
+               setv("처리됨", 1)],
+              [RPS_TURN()])),
+    BRANCH(AND(contains(m(), "끝말잇기"), eq(V("뜻질문"), 0)),
+           clear("쓴말"),
+           setv("엔봇말", item("끝말시작", rand(1, llen("끝말시작")))),
+           append("쓴말", V("엔봇말")), setv("끝말", END(V("엔봇말"), 1)), *_chain_hint(),
+           setv("템플릿", join("좋아요, 끝말잇기! 제가 먼저 할게요. ", V("엔봇말"), "! ", V("끝말안내"),
+                               " 시작하는 말을 해 주세요. (그만하려면 '그만') [끝말잇기]"))),
+    BRANCH(contains(m(), "가위바위보"), setv("가위내점수", 0), setv("가위봇점수", 0),
+           setv("템플릿", "좋아요! 가위, 바위, 보! 하나를 내 주세요. ✊ ✌ ✋ (그만하려면 '그만') [가위바위보]")),
+)
+
+# ================================================================ 계산 · 고르기 · 날짜 · 방금 한 말
+R_SMART = Func("대답: 계산·고르기·날짜")
+_has_digit = lambda: OR(*[contains(m(), d) for d in _digits])
+_MATH_WORDS = [("더하기", "+"), ("플러스", "+"), ("빼기", "-"), ("마이너스", "-"), ("곱하기", "*"), ("나누기", "/"),
+               ("나눈", "/")]
+_MATH_TAILS = ["는얼마야", "은얼마야", "는얼마예요", "은얼마예요", "는얼마", "은얼마", "얼마야", "얼마예요", "얼마",
+               "는몇이야", "은몇이야", "몇이야", "몇이에요", "는몇", "은몇", "몇", "계산해줘", "계산해", "알려줘",
+               "해줘", "이야", "야", "?", "=", "!", "는", "은", "요"]
+_tok = lambda i: item("원단어들", i)
+_CONJ = ["이랑", "하고", "이나", "랑", "와", "과"]
+_bot_said = IFELSE(empty(V("보인답변")), [setv("답변", "아직 제가 한 말이 없어요.")],
+                   [setv("인용글", V("보인답변")), setv("답변", "제가 방금 이렇게 말했어요. “¤”")])
+R_SMART.define(
+    # 방금 한 말 기억하기 ("내가 방금 뭐라고 했지?", "다시 말해 줘")
+    BRANCH(AND(OR(*[contains(m(), w_) for w_ in ["방금", "아까", "조금전", "좀전"]]),
+               OR(*[contains(m(), w_) for w_ in ["뭐라고", "뭐라했", "무슨말", "뭐라그랬", "뭐라말"]])),
+           IFELSE(OR(starts(m(), "너"), starts(m(), "넌"), starts(m(), "니가"), starts(m(), "네가"), contains(m(), "엔봇")),
+                  [_bot_said],
+                  [setv("회상k", llen(REC[C_WHO])), setv("회상찾음", 0),
+                   UNTIL(OR(lt(V("회상k"), 1), eq(V("회상찾음"), 1)),
+                         IFELSE(eq(rec(C_WHO, V("회상k")), "나"), [setv("회상찾음", 1)], [chg("회상k", -1)])),
+                   IFELSE(eq(V("회상찾음"), 1),
+                          [setv("인용글", rec(C_TEXT, V("회상k"))),
+                           setv("답변", join("방금 “¤”", HEAD(JOSA(V("인용글"), "이라고"), slen(V("인용글"))),
+                                              " 했어요."))],
+                          [setv("답변", "아직 아무 말도 안 했어요!")])])),
+    BRANCH(OR(*[eq(m(), w_) for w_ in ["다시말해줘", "다시말해", "다시말해줄래?", "한번더말해줘", "뭐라고?", "뭐라고",
+                                        "다시한번말해줘", "응?"]]),
+           _bot_said),
+    # D-day ("크리스마스까지 며칠 남았어?", "내 생일까지 며칠?", "12월 3일까지 며칠?")
+    BRANCH(OR(eq(m(), "디데이"), eq(m(), "d-day"), eq(m(), "기념일"), eq(m(), "다가오는기념일")),
+           setv("가까운날", 400),
+           *[x for name, mo, dy in D.SPECIAL_DAYS if name in SPECIAL_NAMES for x in [
+               setv("남은날", DAYS(mo, dy)),
+               IF(lt(V("남은날"), V("가까운날")), setv("가까운날", V("남은날")), setv("디데이이름", name),
+                  setv("파싱월", mo), setv("파싱일", dy))]],
+           setv("답변", join("다가오는 날은 ", JOSA(V("디데이이름"), "이에요"), "! ", V("가까운날"), "일 남았어요. (",
+                             V("파싱월"), "월 ", V("파싱일"), "일) 다른 날도 '어린이날까지 며칠?'처럼 물어보세요.")),
+           IF(eq(V("가까운날"), 0), setv("답변", join("오늘이 바로 ", JOSA(V("디데이이름"), "이에요"), "! 🎉")))),
+    IF(undone(), IF(OR(AND(contains(m(), "까지"), OR(*[contains(m(), w_) for w_ in ["며칠", "몇일", "얼마나", "남았",
+                                                                                    "디데이", "d-day"]])),
+                       AND(OR(*[contains(m(), name) for name, _, _ in D.SPECIAL_DAYS]),
+                           OR(*[contains(m(), w_) for w_ in ["언제", "며칠", "몇일", "남았", "디데이", "d-day"]]))),
+       setv("디데이이름", ""), setv("파싱월", 0), setv("파싱일", 0),
+       ELIF_CHAIN(
+           *[(contains(m(), name), [setv("디데이이름", name), setv("파싱월", mo), setv("파싱일", dy)])
+             for name, mo, dy in D.SPECIAL_DAYS],
+           (contains(m(), "생일"),
+            [FINDMEM("내 생일"),
+             IFELSE(gt(V("찾은키번호"), 0),
+                    [setv("생일값", item("내답변", V("찾은키번호"))),
+                     IF(starts(V("생일값"), "F:"), setv("생일값", HEAD(V("생일값"), 2))),
+                     PARSEMD(V("생일값")),
+                     IF(gt(V("파싱월"), 0), setv("디데이이름", join(V("호칭"), "님 생일")))],
+                    [setv("템플릿", "아직 {이름}님 생일을 몰라요. 생일이 언제예요? [사실:내 생일]"), setv("처리됨", 1)])]),
+           otherwise=[PARSEMD(m()),
+                      IFELSE(gt(V("파싱월"), 0), [setv("디데이이름", join(V("파싱월"), "월 ", V("파싱일"), "일"))],
+                             [IF(AND(contains(m(), "월"), contains(m(), "일"), _has_digit()),
+                                 setv("답변", "음, 그런 날짜는 달력에 없어요! 🤔 날짜를 다시 확인해 줄래요?"),
+                                 setv("처리됨", 1))])]),
+       IF(AND(gt(slen(V("디데이이름")), 0), gt(V("파싱월"), 0)),
+          setv("남은날", DAYS(V("파싱월"), V("파싱일"))),
+          IFELSE(eq(V("남은날"), 0),
+                 [setv("답변", join("오늘이 바로 ", JOSA(V("디데이이름"), "이에요"), "! 🎉"))],
+                 [setv("답변", join(V("디데이이름"), "까지 ", V("남은날"), "일 남았어요!")),
+                  IF(NOT(contains(V("디데이이름"), "월 ")),
+                     setv("답변", join(V("답변"), " (", V("파싱월"), "월 ", V("파싱일"), "일)")))]),
+          setv("처리됨", 1)))),
+    # 내일·모레·어제 ("내일 무슨 요일이야?")
+    IF(undone(), IF(AND(is_q(), OR(*[contains(m(), w_) for w_ in ["요일", "며칠", "몇일", "날짜", "몇월"]])),
+       setv("날짜차", 0), setv("날말", ""),
+       ELIF_CHAIN(*[(contains(m(), w_), [setv("날짜차", off), setv("날말", josa_static(w_, ("은", "는")))])
+                    for w_, off in D.RELATIVE_DAYS]),
+       IF(gt(slen(V("날말")), 0),
+          SHIFTDATE(V("날짜차")),
+          setv("답변", join(V("날말"), " ", V("옮긴월"), "월 ", V("옮긴일"), "일 ", V("옮긴요일"), "요일이에요.")),
+          setv("처리됨", 1)))),
+    # 말로 하는 계산 ("3 더하기 5는?", "12*3은?")
+    IF(undone(), IF(AND(_has_digit(), OR(*[contains(m(), w_) for w_, _ in _MATH_WORDS],
+                                         *[contains(m(), op) for op in ["+", "*", "/", "×", "÷"]],
+                                         AND(is_q(), OR(contains(m(), "-"), contains(m(), "x"))))),
+       setv("수식", m()),
+       *[setv("수식", repl(V("수식"), a, b)) for a, b in _MATH_WORDS],
+       *[setv("수식", repl(V("수식"), t, "")) for t in _MATH_TAILS],
+       setv("계산결과", CALC(V("수식"))),
+       IF(NOT(starts(V("계산결과"), "식을")),
+          IFELSE(starts(V("계산결과"), "0으로"), [setv("답변", V("계산결과"))],
+                 [setv("답변", join(JOSA(V("계산결과"), "이에요"), "!"))]),
+          setv("처리됨", 1)))),
+    # 고르기 ("짜장면이랑 짬뽕 중에 뭐 먹을까?", "영화 아니면 게임?")
+    IF(undone(), IF(AND(OR(*[contains(m(), w_) for w_ in ["중에", "중엔", "중하나", "아니면", "vs"]]),
+                        OR(is_q(), *[contains(m(), w_) for w_ in ["골라", "정해", "추천", "뭐가", "vs"]])),
+       clear("선택지"), setv("선택위치", 0), setv("선택종류", ""),
+       *SCAN("원단어들", lambda: [ELIF_CHAIN(
+           (OR(starts(_tok(V("선택k")), "중에"), eq(_tok(V("선택k")), "중"), eq(_tok(V("선택k")), "중엔")),
+            [setv("선택위치", V("선택k")), setv("선택종류", "중"), BREAK()]),
+           (OR(eq(_tok(V("선택k")), "아니면"), eq(_tok(V("선택k")), "아님"), eq(lower(_tok(V("선택k"))), "vs")),
+            [setv("선택위치", V("선택k")), setv("선택종류", "아니면"), BREAK()]))], 4, k="선택k"),
+       IF(AND(eq(V("선택종류"), "중"), gt(V("선택위치"), 1)),
+          IFELSE(contains(V("메시지"), ","),
+                 # 쉼표로 늘어놓았으면 '중' 앞 낱말 모두
+                 [setv("선택j", 1),
+                  REPEAT(minus(V("선택위치"), 1),
+                         IF(NOT(included("불용어", item("단어들", V("선택j")))), append("선택지", item("단어들", V("선택j")))),
+                         chg("선택j", 1))],
+                 # '이랑·하고·와…' 로 이어진 낱말들
+                 [append("선택지", item("단어들", minus(V("선택위치"), 1))),
+                  setv("선택j", minus(V("선택위치"), 2)), setv("선택이어짐", 1),
+                  UNTIL(OR(lt(V("선택j"), 1), eq(V("선택이어짐"), 0)),
+                        IFELSE(OR(*[ends(_tok(V("선택j")), c) for c in _CONJ]),
+                               [append("선택지", item("단어들", V("선택j"))), chg("선택j", -1)],
+                               [setv("선택이어짐", 0)]))])),
+       IF(AND(eq(V("선택종류"), "아니면"), gt(V("선택위치"), 1), lt(V("선택위치"), llen("원단어들"))),
+          setv("선택앞", minus(V("선택위치"), 1)),
+          IF(gt(V("선택앞"), 1), IF(OR(*[ends(_tok(V("선택앞")), e) for e in ["까", "래", "지", "냐"]]), chg("선택앞", -1))),
+          append("선택지", item("단어들", V("선택앞"))),
+          append("선택지", item("단어들", plus(V("선택위치"), 1)))),
+       IF(gt(llen("선택지"), 1),
+          setv("단어", item("선택지", rand(1, llen("선택지")))),
+          IF(gt(slen(V("단어")), 0), setv("템플릿", pick("말-고르기")), setv("처리됨", 1))))),
+    # 주사위 · 동전 · 숫자 뽑기
+    BRANCH(contains(m(), "주사위"),
+           setv("주사위", rand(1, 6)), setv("답변", join("🎲 데굴데굴… ", JOSA(V("주사위"), "이"), " 나왔어요!"))),
+    BRANCH(AND(contains(m(), "동전"), OR(*[contains(m(), w_) for w_ in ["던져", "던지", "앞뒤", "뒤집"]])),
+           IFELSE(eq(rand(1, 2), 1), [setv("답변", "🪙 휙~ 앞면이 나왔어요!")], [setv("답변", "🪙 휙~ 뒷면이 나왔어요!")])),
+    IF(undone(), IF(AND(OR(AND(contains(m(), "부터"), contains(m(), "까지")), AND(contains(m(), "에서"), contains(m(), "사이"))),
+                        _has_digit(), OR(*[contains(m(), w_) for w_ in ["숫자", "랜덤", "아무", "골라", "뽑"]])),
+       setv("범위시작", ""), setv("범위끝", ""),
+       *SCAN("원단어들", lambda: [
+           IF(AND(gt(slen(V("범위시작")), 0), empty(V("범위끝")), _numeric(_tok(V("범위k")))),
+              setv("범위끝", _tok(V("범위k")))),
+           IF(OR(ends(_tok(V("범위k")), "부터"), ends(_tok(V("범위k")), "에서")),
+              setv("범위시작", TAIL(_tok(V("범위k")), 2))),
+           IF(ends(_tok(V("범위k")), "까지"), setv("범위끝", TAIL(_tok(V("범위k")), 2)))], 4, k="범위k"),
+       IF(AND(_numeric(V("범위시작")), _numeric(V("범위끝"))), IF(lt(V("범위시작"), V("범위끝")),
+          setv("답변", join("🎲 ", rand(V("범위시작"), V("범위끝")), "! (", V("범위시작"), "부터 ", V("범위끝"),
+                            " 사이에서 골랐어요)")),
+          setv("처리됨", 1))))),
+    BRANCH(OR(*[contains(m(), w_) for w_ in ["랜덤숫자", "아무숫자", "숫자하나", "숫자골라", "숫자뽑"]]),
+           setv("답변", join("🎲 ", rand(1, 100), "! (1부터 100 사이에서 골랐어요)"))),
+    # 구구단 ("구구단 7단")
+    setv("구구단요청", 0),
+    IF(contains(m(), "구구단"), setv("구구단요청", 1)),
+    IF(AND(gt(llen("원단어들"), 0), lt(llen("원단어들"), 4)),
+       IF(AND(ends(_tok(1), "단"), _numeric(TAIL(_tok(1), 1))), setv("구구단요청", 1))),
+    BRANCH(eq(V("구구단요청"), 1),
+           setv("단수", rand(2, 9)),
+           *SCAN("원단어들", lambda: [IF(AND(ends(_tok(V("단k")), "단"), gt(slen(_tok(V("단k"))), 1)),
+                                        IF(_numeric(TAIL(_tok(V("단k")), 1)), setv("단수", TAIL(_tok(V("단k")), 1))))],
+                 4, k="단k"),
+           setv("답변", join(V("단수"), "단이에요! ",
+                             *[x for i in range(1, 10) for x in [V("단수"), "×", i, "=", calc(V("단수"), "MULTI", i),
+                                                                  " · " if i < 9 else ""]]))),
+)
+
 REPLY.define(
     setv("답변", ""), setv("템플릿", ""), setv("처리됨", 0), setv("이번대기", ""), setv("새기분", ""), setv("기록가림", 0),
+    setv("말투제외", 0), setv("말투변경", 0), setv("인용글", ""),
     setv("지난대기", V("대기질문")), setv("대기질문", ""),
     clear("후보답변"),
     ANALYZE(),
@@ -1028,14 +1451,15 @@ REPLY.define(
     IF(gt(V("위치"), 1),
        setv("명령", repl(sub(V("메시지"), 1, minus(V("위치"), 1)), " ", "")),
        setv("내용", TRIM(HEAD(V("메시지"), V("위치"))))),
-    R_CMD(), R_PENDING(), R_MEMORY(), R_TALK(), R_FEEL(), R_LAST(),
+    # ('주사위 굴려줘' 같은 말이 엔봇이 물어본 것의 대답으로 기억되지 않게 계산·놀이를 먼저 본다)
+    R_CMD(), R_GAME(), R_SMART(), R_PENDING(), R_MEMORY(), R_TALK(), R_FEEL(), R_LAST(),
     # 마무리: 템플릿 → 답변, 대화 상태 저장
     IF(AND(eq(V("연결허용"), 1), gt(slen(V("연결말")), 0), gt(slen(V("템플릿")), 0)),
        setv("템플릿", join(V("연결말"), V("템플릿")))),
     IF(gt(slen(V("템플릿")), 0), setv("답변", FILL(V("템플릿")))),
     IF(empty(V("답변")), setv("답변", "음… 다시 한번 말해 줄래요?")),
     # 바로 전과 똑같은 대답은 하지 않는다
-    IF(eq(V("답변"), V("지난답변")),
+    IF(AND(eq(V("답변"), V("지난답변")), NOT(OR(eq(V("이번대기"), "끝말잇기"), eq(V("이번대기"), "가위바위보")))),
        setv("이번대기", ""), setv("템플릿", pick("말-맞장구")), STARTER(), setv("답변", FILL(V("템플릿")))),
     setv("지난답변", V("답변")),
     setv("직전기분", V("새기분")),
@@ -1044,6 +1468,7 @@ REPLY.define(
        setv("최근주제", V("주제")), SAVEFACT("#최근주제", V("주제"))),
     IF(AND(gt(slen(V("새기분")), 0), NOT(eq(V("새기분"), V("지난기분")))),
        setv("지난기분", V("새기분")), SAVEFACT("#기분", V("새기분"))),
+    IF(eq(V("말투변경"), 1), SAVEFACT("#말투", V("말투"))),
 )
 
 # ================================================================ 대화 기록 (리스트 '기록-…')
@@ -1195,6 +1620,7 @@ LOAD.define(
     *SCAN("내질문", lambda: [
         ELIF_CHAIN((eq(item("내질문", V("불러k")), "#최근주제"), [setv("최근주제", item("내답변", V("불러k")))]),
                    (eq(item("내질문", V("불러k")), "#기분"), [setv("지난기분", item("내답변", V("불러k")))]),
+                   (eq(item("내질문", V("불러k")), "#말투"), [setv("말투", item("내답변", V("불러k")))]),
                    (eq(item("내질문", V("불러k")), "내 이름"),
                     [IF(starts(item("내답변", V("불러k")), "F:"), setv("호칭", HEAD(item("내답변", V("불러k")), 2)))]))],
           3, k="불러k"),
@@ -1216,7 +1642,8 @@ LOAD.define(
 
 # ================================================================ 메인
 def main_script():
-    clean_input = repl(repl(repl(repl(repl(repl(answer(), SEP, " "), "[", "("), "]", ")"), "{", "("), "}", ")"), "|", "/")
+    clean_input = repl(repl(repl(repl(repl(repl(repl(answer(), SEP, " "), "[", "("), "]", ")"), "{", "("), "}", ")"), "|", "/"),
+                       "¤", " ")
     return WHEN_START(
         setv("글자-받침없음", D.NO_BATCHIM), setv("글자-ㄹ받침", D.RIEUL), setv("글자-ㅆ받침", D.SSANG_SIOT),
         HIDE_ANSWER(),
@@ -1232,6 +1659,7 @@ def main_script():
         setv("기록블롭", ""), setv("기억블롭", ""), setv("기록위치", 0), setv("기억위치", 0),
         setv("대기질문", ""), setv("최근주제", ""), setv("지난기분", ""), setv("직전기분", ""), setv("기억변경", 0),
         setv("지난답변", ""), setv("주제", ""), setv("단어", ""), setv("키표시", ""), setv("값", ""), setv("감정점수", 0),
+        setv("말투", "존댓말"), setv("말투제외", 0), setv("끝말", ""), clear("쓴말"),
         IFELSE(eq(slen(repl(V("아이디"), " ", "")), 0),
                [setv("로그인", 0), setv("저장가능", 0), setv("호칭", "방문자"), setv("템플릿", pick("말-환영손님"))],
                [setv("로그인", 1), setv("저장가능", 1),
@@ -1248,8 +1676,10 @@ def main_script():
                 IF(eq(V("저장가능"), 0), PRINT("저장 서버에 연결하지 못해서 이번 대화는 저장되지 않아요.", "알림"))]),
         setv("이번대기", ""),
         setv("답변", FILL(V("템플릿"))),
+        IF(eq(V("말투"), "반말"), setv("답변", STYLE(V("답변")))),
         setv("대기질문", V("이번대기")),
         PRINT(V("답변"), "봇"),
+        setv("보인답변", V("답변")),
         STATUS(join("● ", V("호칭"), "님과 대화 중")),
         setv("대화중", 1),
         UNTIL(eq(V("대화중"), 0),
@@ -1267,6 +1697,10 @@ def main_script():
                  # ('새 대화' 는 화면을 비우므로 줄이 남아 있을 때만 '생각 중' 줄을 지운다)
                  IF(gt(llen("화면종류"), 0), IF(eq(item("화면종류", llen("화면종류")), "생각"),
                     remove("화면글", llen("화면글")), remove("화면종류", llen("화면종류")))),
+                 # 반말로 해 달라고 했으면 엔봇의 말을 반말로 (사용자가 한 말을 그대로 보여 주는 대답은 빼고)
+                 IF(AND(eq(V("말투"), "반말"), eq(V("말투제외"), 0)), setv("답변", STYLE(V("답변")))),
+                 IF(gt(slen(V("인용글")), 0), setv("답변", repl(V("답변"), "¤", V("인용글")))),
+                 setv("보인답변", V("답변")),
                  # 개인정보가 담긴 말은 서버 기록과 기록표에 남기지 않는다
                  IFELSE(eq(V("기록가림"), 1), [LOG("나", "🔒 (개인정보라서 기록하지 않았어요)")], [LOG("나", V("메시지"))]),
                  PRINT(V("답변"), "봇"),
@@ -1371,6 +1805,9 @@ def build():
         lst("통계주제"), *[lst(name) for name in REC.values()],
         lst("지식키", KNOW_KEYS), lst("지식값", KNOW_VALUES),
         lst("먼저-키", [r[0] for r in KNOW[T_ASK][1]]), lst("먼저-질문", [r[1] for r in KNOW[T_ASK][1]]),
+        lst("끝말단어", CHAIN_WORDS), lst("끝말시작", CHAIN_STARTERS), lst("쓴말"), lst("선택지"),
+        lst("가위바위보", ["가위", "바위", "보"]),
+        lst("월일수", D.MONTH_DAYS), lst("월누적", [sum(D.MONTH_DAYS[:i]) for i in range(12)]),
         lst("불용어", D.STOPWORDS), lst("조사목록", D.JOSA_SUFFIXES), lst("형용사", D.ADJ_STEMS), lst("요일", D.WEEKDAYS),
         lst("예말", D.YES_WORDS), lst("모름말", D.NON_ANSWERS), lst("뒤집는말", D.NEGATORS),
         lst("주제뒤말", D.HA_TAILS), lst("끝말목록", _TAILS),
