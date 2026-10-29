@@ -1,101 +1,103 @@
 #!/usr/bin/env python3
-"""작품 대표 이미지(썸네일) thumbnail.png 를 16:9 (1280×720) 로 만든다.
+"""작품 대표 이미지(썸네일) thumbnail.png 를 16:9 로 만든다.
 
-오른쪽 대화는 지어낸 문장이 아니라 시뮬레이터로 작품을 실제로 돌려 나온 대화다.
+글자는 '엔봇'과 '기억하는 AI 친구' 두 줄, 그림은 로봇 하나만 둔 단순한 디자인.
+작품 목록에서 작게 보여도 알아보도록 큰 모양만 쓴다. 1280×720 으로 그리고 1.5배(1920×1080)로 저장한다.
 필요: node + playwright (이 작업 환경에는 설치되어 있음)
 사용법: python3 thumbnail.py  →  thumbnail.png
 """
-import html
-import json
 import os
 import subprocess
 import tempfile
 
 from preview import font_faces
-from simulate import Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 W, H = 1280, 720
+SCALE = 1.5
 
-ROBOT = """<svg viewBox="0 0 120 120" width="132" height="132" aria-hidden="true">
-  <line x1="60" y1="10" x2="60" y2="26" stroke="#FDE68A" stroke-width="6" stroke-linecap="round"/>
-  <circle cx="60" cy="10" r="8" fill="#FDE68A"/>
-  <rect x="14" y="26" width="92" height="78" rx="26" fill="#FFFFFF"/>
-  <rect x="26" y="42" width="68" height="40" rx="18" fill="#312E81"/>
-  <circle cx="45" cy="60" r="7" fill="#A5F3FC"/>
-  <circle cx="75" cy="60" r="7" fill="#A5F3FC"/>
-  <path d="M48 92 Q60 100 72 92" stroke="#6366F1" stroke-width="5" fill="none" stroke-linecap="round"/>
-  <rect x="2" y="52" width="12" height="26" rx="6" fill="#C7D2FE"/>
-  <rect x="106" y="52" width="12" height="26" rx="6" fill="#C7D2FE"/>
+ROBOT = """<svg class="robot" viewBox="0 0 400 400" aria-hidden="true">
+  <defs>
+    <radialGradient id="halo" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#A5B4FC" stop-opacity=".55"/>
+      <stop offset="1" stop-color="#A5B4FC" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="head" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DDE3FF"/>
+    </linearGradient>
+    <linearGradient id="screen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2E2A78"/>
+      <stop offset="1" stop-color="#17143F"/>
+    </linearGradient>
+    <radialGradient id="bulb" cx="40%" cy="35%" r="65%">
+      <stop offset="0" stop-color="#FFFBEB"/>
+      <stop offset="1" stop-color="#FBBF24"/>
+    </radialGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="22" stdDeviation="22" flood-color="#0B0930" flood-opacity=".45"/>
+    </filter>
+    <filter id="glow" filterUnits="userSpaceOnUse" x="0" y="0" width="400" height="400">
+      <feGaussianBlur stdDeviation="7" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <circle cx="200" cy="215" r="196" fill="url(#halo)"/>
+  <rect x="191" y="46" width="18" height="52" rx="9" fill="#E0E7FF"/>
+  <circle cx="200" cy="42" r="21" fill="url(#bulb)" filter="url(#glow)"/>
+  <g filter="url(#shadow)">
+    <rect x="30" y="172" width="40" height="96" rx="20" fill="#A5B4FC"/>
+    <rect x="330" y="172" width="40" height="96" rx="20" fill="#A5B4FC"/>
+    <rect x="58" y="88" width="284" height="262" rx="96" fill="url(#head)"/>
+  </g>
+  <rect x="94" y="138" width="212" height="160" rx="64" fill="url(#screen)"/>
+  <path d="M118 176 Q136 150 172 146" stroke="#FFFFFF" stroke-opacity=".14" stroke-width="10" fill="none"
+        stroke-linecap="round"/>
+  <g filter="url(#glow)" fill="#67E8F9">
+    <rect x="140" y="186" width="36" height="50" rx="18"/>
+    <rect x="224" y="186" width="36" height="50" rx="18"/>
+  </g>
+  <circle cx="152" cy="200" r="6" fill="#FFFFFF"/>
+  <circle cx="236" cy="200" r="6" fill="#FFFFFF"/>
+  <ellipse cx="124" cy="256" rx="15" ry="9" fill="#F472B6" fill-opacity=".45"/>
+  <ellipse cx="276" cy="256" rx="15" ry="9" fill="#F472B6" fill-opacity=".45"/>
+  <path d="M180 260 Q200 276 220 260" stroke="#67E8F9" stroke-width="8" fill="none" stroke-linecap="round"
+        filter="url(#glow)"/>
+</svg>"""
+
+BUBBLE = """<svg class="bubble" viewBox="0 0 190 130" aria-hidden="true">
+  <defs>
+    <filter id="bshadow" x="-20%" y="-20%" width="140%" height="160%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#0B0930" flood-opacity=".35"/>
+    </filter>
+  </defs>
+  <g filter="url(#bshadow)">
+    <rect x="10" y="10" width="170" height="92" rx="46" fill="#FFFFFF"/>
+    <path d="M128 96 L162 124 L150 92 Z" fill="#FFFFFF"/>
+  </g>
+  <circle cx="58" cy="56" r="11" fill="#6366F1"/>
+  <circle cx="95" cy="56" r="11" fill="#818CF8"/>
+  <circle cx="132" cy="56" r="11" fill="#A5B4FC"/>
 </svg>"""
 
 
-def conversation():
-    s = Session(json.load(open(os.path.join(HERE, "project.json"), encoding="utf-8")), {},
-                username="minsu01", nickname="민수", seed=2,
-                inputs=["오늘 시험 망쳤어", "나 고양이 키워", "나비"]).run()
-    return [(tag, text) for tag, text, _ in s.transcript_lines()[1:] if tag in ("나", "봇")]
-
-
-def page(lines):
-    bubbles = "".join(
-        f'<div class="row {"me" if tag == "나" else "bot"}"><div class="bubble">{html.escape(text)}</div></div>'
-        for tag, text in lines)
-    chips = "".join(f'<span class="chip"><b>{icon}</b>{html.escape(text)}</span>' for icon, text in [
-        ("💬", "공감하고 되묻는 대화"), ("🧠", "나를 기억해요"), ("📋", "대화 기록 정리"), ("🔒", "개인정보 보호")])
+def page():
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
 {font_faces()}
 * {{ box-sizing: border-box; margin: 0; }}
-body {{ width: {W}px; height: {H}px; overflow: hidden; font-family: "NanumSquare", "Noto Color Emoji", sans-serif; }}
-.stage {{ position: relative; width: {W}px; height: {H}px; padding: 64px 72px;
-          background: radial-gradient(circle at 18% 20%, #6D5DF6 0%, #4F46E5 38%, #3730A3 100%);
-          display: flex; align-items: center; gap: 56px; color: #FFFFFF; }}
-.stage::before {{ content: ""; position: absolute; inset: 0;
-                  background-image: radial-gradient(rgba(255,255,255,.10) 2px, transparent 2px);
-                  background-size: 28px 28px; }}
-.left {{ position: relative; flex: 1 1 0; }}
-.brand {{ display: flex; align-items: center; gap: 22px; }}
-h1 {{ font-size: 124px; font-weight: 900; letter-spacing: -2px; line-height: 1; }}
-.sub {{ margin-top: 22px; font-size: 40px; font-weight: 800; color: #E0E7FF; }}
-.tag {{ margin-top: 14px; font-size: 25px; font-weight: 400; color: #C7D2FE; }}
-.chips {{ margin-top: 36px; display: flex; flex-wrap: wrap; gap: 12px; max-width: 560px; }}
-.chip {{ display: inline-flex; align-items: center; gap: 10px; padding: 12px 20px; border-radius: 999px;
-         background: rgba(255,255,255,.14); border: 1px solid rgba(255,255,255,.28);
-         font-size: 23px; font-weight: 700; color: #FFFFFF; }}
-.chip b {{ font-family: "Noto Color Emoji"; font-weight: 400; }}
-.made {{ margin-top: 34px; font-size: 20px; color: #A5B4FC; }}
-.made strong {{ color: #FDE68A; font-weight: 800; }}
-.card {{ position: relative; flex: 0 0 480px; height: 592px; border-radius: 34px; background: #F1F5F9;
-         box-shadow: 0 30px 60px rgba(15, 12, 60, .45); overflow: hidden; display: flex; flex-direction: column; }}
-.head {{ display: flex; align-items: center; gap: 12px; padding: 20px 26px; background: #FFFFFF;
-         border-bottom: 1px solid #E2E8F0; color: #1E293B; font-size: 24px; font-weight: 800; }}
-.dot {{ width: 12px; height: 12px; border-radius: 50%; background: #34D399; }}
-.head small {{ margin-left: auto; font-size: 17px; font-weight: 400; color: #64748B; }}
-.chat {{ flex: 1; min-height: 0; padding: 18px 22px 14px; display: flex; flex-direction: column;
-         justify-content: flex-end; gap: 10px; }}
-.row {{ display: flex; }}
-.row.me {{ justify-content: flex-end; }}
-.bubble {{ max-width: 84%; padding: 11px 17px; font-size: 20px; line-height: 1.42; border-radius: 22px;
-           word-break: keep-all; }}
-.bot .bubble {{ background: #FFFFFF; color: #1E293B; border-bottom-left-radius: 6px;
-                box-shadow: 0 2px 6px rgba(15, 23, 42, .08); }}
-.me .bubble {{ background: #4F46E5; color: #FFFFFF; border-bottom-right-radius: 6px; font-weight: 700; }}
-.input {{ flex: 0 0 auto; margin: 0 22px 20px; height: 52px; border-radius: 27px; background: #FFFFFF; border: 2px solid #E2E8F0;
-          display: flex; align-items: center; padding: 0 8px 0 22px; color: #94A3B8; font-size: 19px; }}
-.input span {{ margin-left: auto; width: 40px; height: 40px; border-radius: 50%; background: #4F46E5; }}
+body {{ width: {W}px; height: {H}px; overflow: hidden; font-family: "NanumSquare", sans-serif; }}
+.stage {{ position: relative; width: {W}px; height: {H}px; overflow: hidden;
+          background: radial-gradient(900px 700px at 74% 52%, #6D6AF7 0%, #4F46E5 38%, #3730A3 68%, #1E1B4B 100%); }}
+.text {{ position: absolute; left: 112px; top: 50%; transform: translateY(-54%); color: #FFFFFF; }}
+h1 {{ font-size: 212px; font-weight: 900; letter-spacing: -8px; line-height: .95;
+      text-shadow: 0 14px 40px rgba(11, 9, 48, .35); }}
+p {{ margin-top: 34px; font-size: 54px; font-weight: 800; letter-spacing: -1px; color: #C7D2FE; }}
+.robot {{ position: absolute; width: 520px; height: 520px; left: 690px; top: 132px; }}
+.bubble {{ position: absolute; width: 190px; height: 130px; left: 642px; top: 92px; }}
 </style></head><body><div class="stage">
-  <div class="left">
-    <div class="brand">{ROBOT}<h1>엔봇</h1></div>
-    <div class="sub">기억하는 AI 친구</div>
-    <div class="tag">이야기를 듣고, 공감하고, 다음에도 기억해요</div>
-    <div class="chips">{chips}</div>
-    <div class="made"><strong>엔트리</strong> 블록 코딩으로 만든 챗봇</div>
-  </div>
-  <div class="card">
-    <div class="head"><span class="dot"></span>엔봇<small>민수님과 대화 중</small></div>
-    <div class="chat">{bubbles}</div>
-    <div class="input">메시지를 입력하세요<span></span></div>
-  </div>
+  <div class="text"><h1>엔봇</h1><p>기억하는 AI 친구</p></div>
+  {ROBOT}
+  {BUBBLE}
 </div></body></html>"""
 
 
@@ -103,13 +105,14 @@ def main():
     out = os.path.join(HERE, "thumbnail.png")
     with tempfile.TemporaryDirectory() as tmp:
         page_path = os.path.join(tmp, "thumbnail.html")
-        open(page_path, "w", encoding="utf-8").write(page(conversation()))
+        with open(page_path, "w", encoding="utf-8") as f:
+            f.write(page())
         script = (
             "const { chromium } = require('playwright');"
             "(async () => { const b = await chromium.launch();"
-            f"const p = await b.newPage({{ viewport: {{ width: {W}, height: {H} }}, deviceScaleFactor: 1 }});"
-            f"await p.goto('file://{page_path}'); await p.waitForTimeout(500);"
-            f"await p.screenshot({{ path: '{out}' }}); await b.close(); }})();"
+            f"const p = await b.newPage({{ viewport: {{ width: {W}, height: {H} }}, deviceScaleFactor: {SCALE} }});"
+            f"await p.goto('file://{page_path}'); await p.evaluate(() => document.fonts.ready);"
+            f"await p.waitForTimeout(300); await p.screenshot({{ path: '{out}' }}); await b.close(); }})();"
         )
         subprocess.run(["node", "-e", script], check=True)
     print("wrote", out)
