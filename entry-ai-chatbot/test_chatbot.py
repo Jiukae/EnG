@@ -11,6 +11,7 @@
 실행:  python3 test_chatbot.py
 """
 import csv
+import datetime
 import io
 import json
 import os
@@ -20,7 +21,7 @@ import tarfile
 import unittest
 
 import data as D
-from build_project import LOG_FIELDS, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS, dueum_pairs
+from build_project import LOG_FIELDS, MAX_DIARY, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS, dueum_pairs
 from dsl import walk_blocks
 from simulate import EntryError, Session
 
@@ -263,7 +264,8 @@ class StructureTest(unittest.TestCase):
             self.assertTrue(word == word.lower() and " " not in word, word)
         for word, answers in rows["말"]:
             # 대답이 여러 개면 ' | ' 로 나눠 둔다. 말 속 조각을 찾는 방식이라 키워드는 2~10글자
-            self.assertTrue(2 <= len(word) <= 10, word)
+            # (한 글자 말 '헐', 'ㅋ' 은 말 전체가 그 글자일 때만 찾는다)
+            self.assertTrue(1 <= len(word) <= 10, word)
             self.assertTrue(all(a.strip() for a in answers.split(" | ")), word)
         for word, score in rows["감"]:
             self.assertTrue(re.fullmatch(r"-?[1-9]", score), (word, score))
@@ -435,8 +437,8 @@ class ConversationTest(unittest.TestCase):
         chat(server, "d", ["오늘 시험 망쳤어"])
         s = chat(server, "d", [])
         welcome = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
-        self.assertIn("시험", welcome)
-        self.assertTrue(any(w in welcome for w in ["지난번", "저번"]), welcome)
+        # 그 주제로 마지막에 한 말을 꺼내고, 그때 속상해했으니 괜찮아졌는지 묻는다
+        self.assertEqual(welcome, "민수님, 다시 왔군요! 아까 “오늘 시험 망쳤어”라고 했었죠. 그 뒤로 좀 괜찮아졌어요?")
         server = {}
         chat(server, "e", ["아 진짜 짜증나"])
         s = chat(server, "e", [])
@@ -640,7 +642,8 @@ class RecordTest(unittest.TestCase):
         inputs = ["안녕", "오늘 시험 망쳤어", "수학", "나 고양이 키워", "나비", "블랙홀이 뭐야?", "수수께끼", "ㅋㅋ",
                   "기록표", "기록 검색: 나비", "기록 통계", "기억 목록", "새 대화", "기록표 끄기", "도움말", "?",
                   "반말 써", "끝말잇기", "기차", "그만", "가위바위보", "보", "그만", "3 곱하기 4는?", "디데이",
-                  "방금 내가 뭐라고 했어?", "존댓말 써"]
+                  "방금 내가 뭐라고 했어?", "존댓말 써", "야르", "ㅎㅇ", "헐", "킹받네", "ㅇㅇ", "지난번에 무슨 얘기 했지?",
+                  "저번에 시험 얘기 했었나?"]
         server = {}
         Session(project, server, username="t1", nickname="민수", inputs=inputs).run()
         Session(project, server, username="t1", nickname="민수", inputs=["안녕", "기록표"]).run()
@@ -842,7 +845,10 @@ class WordChainTest(unittest.TestCase):
         used = set()
 
         def answer(s):
-            word = self.word_for(next_letters([t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]), used)
+            last = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
+            if "시작하는 말이 생각 안 나요" in last:  # 엔봇이 졌으면 끝
+                return "그만"
+            word = self.word_for(next_letters(last), used)
             used.add(word)
             return word
         s = play(["끝말잇기"] + [answer] * 6 + ["그만"], seed=4)
@@ -921,6 +927,150 @@ class RockPaperScissorsTest(unittest.TestCase):
         self.assertNotIn("저는", r[1])
 
 
+# ------------------------------------------------------------------ 신조어 · 초성체
+def slang_rows():
+    with open(os.path.join(HERE, "knowledge", "표-신조어.csv"), encoding="utf-8") as f:
+        return list(csv.reader(f))[1:]
+
+
+def slang_options(piece):
+    """신조어 표에서 찾을 말이 piece 인 줄의 대답들 ({이름} 채우고 [표시] 뗀 모양)."""
+    answers = next(r[3] for r in slang_rows() if r[1] == piece)
+    return [re.sub(r" ?\[[^\]]*\]$", "", a.strip()).replace("{이름}", "민수") for a in answers.split(" | ")]
+
+
+class SlangTest(unittest.TestCase):
+    def test_replies(self):
+        for text, piece in [("야르", "야르"), ("야르~~", "야르"), ("ㅎㅇ", "ㅎㅇ"), ("킹받네", "킹받"), ("어쩔티비", "어쩔티비"),
+                            ("ㅂㅇ", "ㅂㅇ"), ("헐", "헐"), ("헐!!", "헐"), ("ㅋ", "ㅋ"), ("중꺾마", "중꺾마"),
+                            ("럭키비키", "럭키비키"), ("ㅅㅂ", "ㅅㅂ"), ("오히려 좋아", "오히려좋아"), ("ㄹㅇ", "ㄹㅇ")]:
+            for seed in range(2):
+                reply = bot_replies(chat({}, "sl", [text], seed=seed))[0]
+                self.assertIn(reply, slang_options(piece), text)
+
+    def test_meanings(self):
+        rows = {r[0]: r[2] for r in slang_rows()}
+        r = bot_replies(chat({}, "sl2", ["야르가 뭐야?", "킹받다가 뭐야?", "ㅎㅇ가 뭐야?", "어쩔티비가 뭐야?"]))
+        self.assertEqual(r[0], "야르는 " + rows["야르"])
+        self.assertEqual(r[1], "킹받다는 " + rows["킹받다"])
+        self.assertEqual(r[2], "ㅎㅇ는 " + rows["ㅎㅇ"])
+        self.assertEqual(r[3], "어쩔티비는 " + rows["어쩔티비"])
+
+    def test_feelings_in_sentences(self):
+        s = chat({}, "sl3", ["오늘 학교에서 친구가 놀려서 진짜 킹받았어"])
+        self.assertLess(int(s.var("감정점수")), 0)
+        self.assertTrue(bot_replies(s)[0].startswith("오늘 학교에서 친구가 놀려서 진짜 킹받았군요."))
+        for text in ["오늘 축구 개웃겼어", "시험 잘 봤어", "완전 핵꿀잼이었어"]:
+            self.assertGreater(int(chat({}, "sl4", [text]).var("감정점수")), 0, text)
+
+    def test_not_saved_as_answer(self):
+        """엔봇이 물어본 것('롤모델이 누구예요?')에 신조어·초성체로 대답하면 기억하지 않는다."""
+        for text in ["어쩔티비", "ㅇㅇ", "ㅋㅋㅋ", "야르"]:
+            s = play([set_vars(text, 대기질문="사실:내 롤모델")])
+            self.assertNotIn("내 롤모델", memory(s), text)
+        s = play([set_vars("민수가 롤모델이야", 대기질문="사실:내 롤모델")])  # 보통 대답은 그대로 기억
+        self.assertNotIn("내 롤모델", [k for k in memory(s) if memory(s)[k] == "F:ㅇㅇ"])
+
+    def test_chosung_yes_and_banmal_mode(self):
+        # '오늘 기분 어때요?' 에 'ㅇㅇ' (= 응)
+        for seed in range(3):
+            r = bot_replies(chat({}, "sl5", ["안녕", "ㅇㅇ"], seed=seed))
+            self.assertIn(r[1], [p.replace(" [이야기]", "") for p in D.PHRASES["말-기분응"]])
+        # '더 들려줄래요?' 에 'ㅇㅇ'
+        r = bot_replies(play(["ㅋㅋ", "ㅇㅇ"]))
+        self.assertIn(r[1], [p.split(" [")[0] for p in D.PHRASES["말-응대답"]])
+        self.assertEqual(chat({}, "sl6", ["반모"]).var("말투"), "반말")
+        self.assertEqual(chat({}, "sl7", ["반모가 뭐야?"]).var("말투"), "존댓말")
+
+
+# ------------------------------------------------------------------ 지난 이야기 (예전 대화 참고)
+def visit(server, inputs, day, seed=0):
+    now = datetime.datetime(2026, 10, 26, 14, 5) + datetime.timedelta(days=day)
+    return Session(PROJECT, server, username="past", nickname="민수", inputs=inputs, seed=seed, now=now).run()
+
+
+def welcome_of(s):
+    lines = s.transcript_lines()
+    start = max([i for i, (_, t, _) in enumerate(lines) if "이어서" in t] + [-1]) + 1
+    return next(t for tag, t, _ in lines[start:] if tag == "봇")
+
+
+class PastTalkTest(unittest.TestCase):
+    def test_links_same_topic_across_days(self):
+        server = {}
+        s = visit(server, ["오늘 수학 시험 망쳤어", "나 강아지 키워"], 0)
+        self.assertEqual(s.lst("이야기주제"), ["시험", "강아지"])
+        # 다음 날: 마지막 주제로 한 말을 꺼내 인사하고, 시험 이야기가 나오면 그때 기분과 견준다
+        s = visit(server, ["시험 결과 나왔는데 생각보다 잘 봤어", "시험 진짜 다행이야", "강아지랑 산책했는데 너무 좋았어"], 1)
+        self.assertEqual(welcome_of(s), "민수님, 다시 왔군요! 어제 “나 강아지 키워”라고 했었죠. 그 뒤로 어떻게 됐어요?")
+        r = bot_replies(s)
+        self.assertTrue(r[0].startswith("어제는 “오늘 수학 시험 망쳤어”라고 하면서 속상해했는데, 이번엔 기분이 좋아 보여서 다행이에요! "),
+                        r[0])
+        self.assertFalse(r[1].startswith("어제"), r[1])  # 같은 대화에서는 한 번만
+        s = visit(server, ["시험 또 망했어", "시험 너무 싫어"], 3)
+        self.assertTrue(welcome_of(s).startswith("민수님, 다시 왔군요! 2일 전에 “강아지랑 산책했는데 너무 좋았어”라고 했었죠. 요즘도"))
+        r = bot_replies(s)
+        self.assertTrue(r[0].startswith("2일 전에는 “시험 진짜 다행이야”라고 하면서 즐거워했는데, 이번엔 속상한 일이 있었군요. "),
+                        r[0])
+        s = visit(server, [], 20)
+        self.assertEqual(welcome_of(s), "민수님, 다시 왔군요! 지난번(10월 29일)에 “시험 너무 싫어”라고 했었죠. 그 뒤로 좀 괜찮아졌어요?")
+
+    def test_same_feeling_and_banmal(self):
+        server = {}
+        visit(server, ["강아지가 아파서 걱정돼"], 0)
+        visit(server, ["반말 써", "오늘 학교 재밌었어"], 1)
+        s = visit(server, ["강아지가 아직도 아파서 슬퍼"], 2)
+        reply = bot_replies(s)[0]
+        # 따옴표 속 내 말은 반말로 바꾸지 않는다
+        self.assertTrue(reply.startswith("2일 전에도 “강아지가 아파서 걱정돼”라고 하면서 힘들어했지… "), reply)
+
+    def test_ask_about_past(self):
+        server = {}
+        r = bot_replies(visit(server, ["지난번에 무슨 얘기 했지?"], 0))
+        self.assertIn("아직 기억나는 지난 이야기가 없어요", r[0])
+        visit(server, ["오늘 수학 시험 망쳤어", "나 강아지 키워", "강아지랑 산책해서 너무 좋았어"], 0)
+        r = bot_replies(visit(server, ["지난번에 무슨 얘기 했지?", "저번에 시험 얘기 했었나?", "예전에 축구 얘기 했었나?"], 2))
+        self.assertEqual(r[0].split(" · ")[0], "기억나요! 최근에 나눈 이야기예요.")
+        self.assertIn("· 10월 26일 산책: “강아지랑 산책해서 너무 좋았어”", r[0])
+        self.assertIn("· 10월 26일 시험: “오늘 수학 시험 망쳤어”", r[0])
+        self.assertEqual(r[1], "2일 전에 시험 이야기를 할 때 “오늘 수학 시험 망쳤어”라고 했어요.")
+        self.assertTrue(r[2].startswith("축구는 기억에 없어요. 최근에는 이런 이야기를 했어요."), r[2])
+        # 기억 목록에도 보인다
+        self.assertIn("· 지난 이야기: 시험, 강아지, 산책", bot_replies(visit(server, ["기억 목록"], 2))[0])
+
+    def test_quiet_talk_brings_back_old_topic(self):
+        found = False
+        for seed in range(8):
+            server = {}
+            visit(server, ["오늘 수학 시험 망쳤어", "나 강아지 키워", "강아지랑 산책해서 너무 좋았어"], 0)
+            replies = bot_replies(visit(server, ["음", "음…", "흠"], 1, seed=seed))
+            found = found or any("그러고 보니 어제 " in r and "그 뒤로 어떻게 됐어요?" in r for r in replies)
+        self.assertTrue(found)
+
+    def test_saved_trimmed_and_private(self):
+        server = {}
+        with open(os.path.join(HERE, "knowledge", "표-주제.csv"), encoding="utf-8") as f:
+            topics = [r[0] for r in csv.reader(f)][1:]
+        topics = [t for t in topics if re.fullmatch("[가-힣]{2,4}", t)][:MAX_DIARY + 3]
+        s = visit(server, [f"{t} 때문에 너무 신났어" for t in topics] + ["내 비밀번호는 1234야"], 0)
+        self.assertEqual(s.lst("이야기주제"), [t for t in topics if t in s.lst("이야기주제")])
+        self.assertEqual(len(s.lst("이야기주제")), MAX_DIARY)
+        s2 = visit(server, [], 1)
+        self.assertEqual(s2.lst("이야기주제"), s.lst("이야기주제"))
+        self.assertEqual(s2.lst("이야기값"), s.lst("이야기값"))
+        self.assertNotIn("1234", json.dumps(server, ensure_ascii=False))
+
+    def test_bad_saved_lines_are_skipped(self):
+        server = {}
+        visit(server, ["오늘 수학 시험 망쳤어"], 0)
+        mem = server[next(v["id"] for v in PROJECT["variables"] if v["name"] == "기억저장소")]
+        i = next(i for i, x in enumerate(mem) if x.startswith("past|"))
+        mem[i] += "@=x¶@고장=2026|1¶@축구=2026-10-26/1/좋아¶@수학=2026-10-26|2|재밌어¶"
+        s = visit(server, ["수학 진짜 재밌었어"], 1)
+        self.assertEqual(s.lst("이야기주제")[:2], ["시험", "수학"])
+        self.assertTrue(bot_replies(s)[0].startswith("어제도 수학 이야기를 했었죠! 그때 “재밌어”라고 했어요. "), bot_replies(s)[0])
+
+
 class SafetyTest(unittest.TestCase):
     def test_private_info_is_not_remembered_or_logged(self):
         server = {}
@@ -947,7 +1097,8 @@ class RobustnessTest(unittest.TestCase):
                   "내", "내 ", "나는", "좋아해", "싫어", "이야", "했어", "봤어", "뭐야", "이름은", "살", "12살",
                   "고양이", "시험", "때문에", "해서", "몰라", "응", "너는", "a" * 40, "반말 써", "존댓말", "끝말잇기",
                   "가위바위보", "보", "그만", "주사위", "동전 던져", "중에", "아니면", "vs", "곱하기", "나누기", "부터",
-                  "까지", "에서", "사이", "며칠", "월", "일", "디데이", "방금", "뭐라고", "구구단", "단", "내일", "¤"]
+                  "까지", "에서", "사이", "며칠", "월", "일", "디데이", "방금", "뭐라고", "구구단", "단", "내일", "¤",
+                  "야르", "ㅎㅇ", "ㅋ", "헐", "개", "킹받", "@", "지난번", "무슨얘기", "저번에", "기억나", "잘", "반모"]
         server = {}
         users = ["u1", "u2", "user_3", "4"]
         worst = 0

@@ -50,6 +50,8 @@ MAX_HISTORY_LINES = 40  # 사용자마다 서버에 남기는 대화 줄 수
 MAX_LINE_LEN = 140      # 서버에 남기는 한 줄의 최대 길이 (날짜·시각·주제·감정 포함)
 MAX_MEMORIES = 50       # 사용자마다 기억하는 것의 수
 MAX_RECORDS = 200       # 기록 리스트(와 대화기록표)에 남기는 줄 수
+MAX_DIARY = 20          # 사용자마다 기억하는 '지난 이야기' (주제별 날짜·감정·한 말) 수
+DIARY_SUMMARY = 30      # 지난 이야기로 남기는 한 말의 최대 길이
 
 # 대화기록표 칸 번호
 C_NO, C_DATE, C_TIME, C_WHO, C_TOPIC, C_FEEL, C_TEXT = range(1, 8)
@@ -80,6 +82,21 @@ KNOW = {name: read_csv(name) for name in [T_TOPIC, T_DEF, T_TALK, T_FEEL, T_ASK,
 TABLE_ROWS = {name: rows for name, (_fields, rows) in KNOW.items()}
 assert KNOW[T_LOG][0] == LOG_FIELDS
 KIND = {T_TOPIC: "주", T_DEF: "뜻", T_TALK: "말", T_FEEL: "감"}  # 리스트 '지식키' 의 앞머리
+
+# knowledge/표-신조어.csv — 신조어·초성체 ('야르', 'ㅎㅇ', '킹받다' …). 한 줄을 세 가지 지식으로 나눠 넣는다:
+#   뜻 ('킹받다가 뭐야?') · 일상 대화 (말 속에 '킹받' 이 있으면 그 대답) · 감정어 ('킹받았어' → 점수)
+T_SLANG = "표-신조어"
+SLANG = read_csv(T_SLANG)[1]
+SLANG_FORMS = []  # 신조어 꼴 (엔봇이 물어본 것의 대답으로 기억하지 않는다)
+_defined = {r[0] for r in KNOW[T_DEF][1]}
+for _word, _piece, _meaning, _answers, _score in SLANG:
+    _forms = list(dict.fromkeys([_word.lower(), _piece.lower()]))
+    SLANG_FORMS += _forms
+    KNOW[T_DEF][1].extend([f, _meaning, "신조어"] for f in _forms if f not in _defined)  # 단어뜻에 이미 있으면 그쪽 뜻
+    if _answers.strip():
+        KNOW[T_TALK][1].append([_piece.lower(), _answers])
+    if _score.strip():
+        KNOW[T_FEEL][1].append([_piece.lower(), _score])
 
 
 def dueum_pairs():
@@ -122,7 +139,8 @@ def banmal_static(text):
 def chain_words():
     """끝말잇기 낱말: 흔한 명사 + 주제·단어 뜻의 한글 낱말 (2~6글자), 자바스크립트 글자 순서로 정렬."""
     words = set(w for w in D.WORDCHAIN_NOUNS if len(w) >= 2)
-    words |= {r[0] for t in (T_TOPIC, T_DEF) for r in KNOW[t][1] if re.fullmatch(r"[가-힣]{2,6}", r[0])}
+    words |= {r[0] for t in (T_TOPIC, T_DEF) for r in KNOW[t][1]
+              if re.fullmatch(r"[가-힣]{2,6}", r[0]) and r[-1] != "신조어"}  # ('킹받' 같은 신조어 조각은 빼고)
     # 반말로 바꿀 때 망가지는 낱말은 빼 둔다 ('담요!' → '담!')
     words = {w for w in words if banmal_static(f" {w}! ") == f" {w}! " and banmal_static(f" {w}. ") == f" {w}. "}
     words = sorted(words, key=lambda w: w.encode("utf-16-be"))
@@ -185,6 +203,9 @@ LOAD = Func("데이터 불러오기", counters=["줄번호"])
 SEARCH = Func("기록 검색", ["낱말"], counters=["찾은수"])
 STATS = Func("기록 통계", counters=["내말", "봇말", "좋음", "나쁨", "보통", "오늘"])
 CLEARLOG = Func("기록 비우기")
+DIARY_FIND = Func("지난 이야기 찾기", ["주제"])
+DIARY_GET = Func("지난 이야기 꺼내기", ["번호"])
+DIARY_PUT = Func("지난 이야기 적기", ["주제", "점수", "요약"])
 
 # ================================================================ 지식 찾기 · 대화기록표
 KNOWLEDGE = Func("지식 찾기", ["종류", "낱말"], value=True)
@@ -552,6 +573,10 @@ FEEL.define(
     # 낱말 전체 → 앞 4·3·2 글자 순서로 감정어 테이블에서 찾는다
     setv("감정낱말", FEEL.p("낱말")), setv("낱말점수", 0),
     _feel_lookup(None), _feel_lookup(4), _feel_lookup(3), _feel_lookup(2),
+    # 못 찾았고 '개웃겨', '핵좋아', '왕짜증' 처럼 힘주는 말이 앞에 붙었으면 떼고 한 번 더
+    IF(AND(eq(V("낱말점수"), 0), gt(slen(V("감정낱말")), 2), gt(find(D.INTENSIFIERS, charat(V("감정낱말"), 1)), 0)),
+       setv("감정낱말", HEAD(V("감정낱말"), 1)),
+       _feel_lookup(None), _feel_lookup(4), _feel_lookup(3), _feel_lookup(2)),
     ret=V("낱말점수"))
 
 ANALYZE.define(
@@ -568,6 +593,11 @@ ANALYZE.define(
     IF(contains(_q_endings, join("|", END(V("문장"), 2), "|")), setv("질문여부", 1)),
     setv("뜻질문", 0),
     IF(OR(*[contains(_m(), c) for c in D.DEFINITION_CUES]), setv("뜻질문", 1)),
+    # 'ㅇㅇ', 'ㅋㅋ', '어쩔티비' 처럼 자음·모음으로 시작하거나 신조어 한 낱말인 말
+    setv("신조어말", 0),
+    IF(gt(slen(_m()), 0),
+       IF(OR(gt(find(D.JAMO, charat(_m(), 1)), 0), included("신조어목록", lower(repl(V("문장"), " ", "")))),
+          setv("신조어말", 1))),
     # 낱말 나누기 (원단어들) + 조사 떼기 (단어들) + 감정 점수 (감정어 테이블)
     clear("원단어들"), clear("단어들"),
     setv("감정점수", 0), setv("이전낱말", ""),
@@ -586,6 +616,9 @@ ANALYZE.define(
                 # '안 먹어' 처럼 띄어 쓴 부정은 붙여서 다시 찾아본다 (감정어 테이블의 '안먹')
                 IF(AND(included("뒤집는말", V("이전낱말")), eq(V("낱말점수"), 0)),
                    setv("낱말점수", FEEL(lower(join(V("이전낱말"), V("단어원형")))))),
+                # '잘 봤어', '잘 풀렸어' 처럼 '잘' 과 띄어 쓴 말도 붙여서 찾아본다 (감정어 테이블의 '잘봤')
+                IF(AND(eq(V("이전낱말"), "잘"), eq(V("낱말점수"), 0)),
+                   setv("낱말점수", FEEL(lower(join("잘", V("단어원형")))))),
                 # '못 자', '못 갔어' 처럼 감정어가 아니어도 '못' 뒤의 말은 조금 아쉬운 말로 본다
                 IF(AND(eq(V("이전낱말"), "못"), eq(V("낱말점수"), 0)), setv("낱말점수", -1)),
                 chg("감정점수", V("낱말점수")),
@@ -787,6 +820,7 @@ HELP = SEP.join([
     "놀이: 끝말잇기 · 가위바위보 · 주사위 · 수수께끼 · 퀴즈",
     "3 더하기 5는? · 크리스마스까지 며칠? · 내일 무슨 요일?",
     "짜장면이랑 짬뽕 중에 뭐 먹을까? · 반말 써 / 존댓말 써",
+    "지난번에 무슨 얘기 했지? · 야르 · ㅎㅇ · 킹받다가 뭐야?",
     "번역: 문장 · 한국어로: sentence · 계산: 12*3",
     "몇 시야? · 새 대화 · 종료",
 ])
@@ -804,10 +838,11 @@ R_CMD.define(
     # 비밀번호·전화번호 같은 개인정보는 기억하지 않는다
     BRANCH(AND(not_q(), sensitive(m())), setv("템플릿", pick("말-개인정보")), setv("기록가림", 1)),
     # 말투 바꾸기 ("반말 써", "존댓말 써")
-    BRANCH(OR(*[contains(m(), w_) for w_ in D.BANMAL_OFF]),
+    # ('반모가 뭐야?' 처럼 뜻을 묻는 말은 빼고)
+    BRANCH(AND(OR(*[contains(m(), w_) for w_ in D.BANMAL_OFF]), NOT(AND(is_q(), eq(V("뜻질문"), 1)))),
            IFELSE(eq(V("말투"), "존댓말"), [setv("템플릿", "지금도 존댓말로 말하고 있어요! 😊")],
                   [setv("말투", "존댓말"), setv("말투변경", 1), setv("템플릿", pick("말-반말끄기"))])),
-    BRANCH(OR(*[contains(m(), w_) for w_ in D.BANMAL_ON]),
+    BRANCH(AND(OR(*[contains(m(), w_) for w_ in D.BANMAL_ON]), NOT(AND(is_q(), eq(V("뜻질문"), 1)))),
            IFELSE(eq(V("말투"), "반말"), [setv("템플릿", "벌써 편하게 말하고 있어요! 😄")],
                   [setv("말투", "반말"), setv("말투변경", 1), setv("템플릿", pick("말-반말켜기"))])),
     BRANCH(OR(starts(m(), "도움말"), eq(m(), "help"), eq(m(), "?")), setv("답변", HELP)),
@@ -875,6 +910,11 @@ R_CMD.define(
                                       setv("값", item("내답변", V("답k"))), IF(starts(V("값"), "F:"), setv("값", HEAD(V("값"), 2))),
                                       setv("답변", join(V("답변"), SEP, "· ", item("내질문", V("답k")), " → ", V("값"))),
                                       chg("요약수", 1))], 3, k="답k"),
+           IF(gt(llen("이야기주제"), 0),
+              setv("지난주제들", ""),
+              *SCAN("이야기주제", lambda: [setv("지난주제들", join(V("지난주제들"), ", ", item("이야기주제", V("답k"))))],
+                    4, k="답k"),
+              setv("답변", join(V("답변"), SEP, "· 지난 이야기: ", HEAD(V("지난주제들"), 2))), chg("요약수", 1)),
            IFELSE(eq(V("요약수"), 0),
                   [setv("답변", "아직 기억하고 있는 게 없어요. 이야기를 들려주면 하나씩 기억할게요!")],
                   [setv("답변", join("기억하고 있는 것 ", V("요약수"), "개예요.", V("답변")))])),
@@ -892,7 +932,7 @@ R_PENDING.define(
     # 직전에 내가 물어본 것에 대한 대답이면 기억한다
     BRANCH(AND(starts(V("지난대기"), "사실:"), not_q(), empty(V("명령")), lt(slen(V("문장")), 26),
                lt(llen("원단어들"), 5), NOT(eq(V("서술종류"), "동사")),
-               NOT(OR(*[contains(m(), w_) for w_ in D.SOCIAL]))),
+               NOT(OR(*[contains(m(), w_) for w_ in D.SOCIAL])), eq(V("신조어말"), 0)),
            setv("키", HEAD(V("지난대기"), 3)),
            IFELSE(OR(*[contains(m(), d) for d in D.DONT_KNOW]),
                   [setv("템플릿", pick("말-몰라"))],
@@ -981,6 +1021,11 @@ R_TALK.define(IF(undone(),
     # 그 줄의 대답들('|' 로 나눠 둔 것) 중에서 고른다
     IF(undone(), IF(_talk_guard(),
        *FIND_PIECE(T_TALK, m(), "찾은말", "최장길이", "답k"),
+       # 한 글자 말 ('헐', 'ㅋ', '굿') 은 말 전체가 그 한 글자일 때만 ('헐!!' 도)
+       setv("한글자말", m()),
+       IF(gt(slen(V("한글자말")), 1), setv("한글자말", lower(repl(V("문장"), " ", "")))),
+       IF(AND(empty(V("찾은말")), eq(slen(V("한글자말")), 1)),
+          IF(has(T_TALK, V("한글자말")), setv("찾은말", V("한글자말")))),
        IF(gt(slen(V("찾은말")), 0),
           setv("남은답", join(lookup(T_TALK, V("찾은말")), " | ")),
           UNTIL(empty(V("남은답")),
@@ -1066,11 +1111,14 @@ R_LAST.define(IF(undone(),
     BRANCH(is_q(),
            setv("템플릿", pick("말-모르는질문")),
            IF(lt(slen(V("문장")), 41), setv("이번대기", join("답:", V("문장"))))),
+    BRANCH(AND(OR(eq(V("지난대기"), "이야기"), eq(V("지난대기"), "이유")), included("예말", m())),
+           setv("템플릿", pick("말-응대답"))),
     # 짧은 대답 ("양념", "건축") 은 받아 주고 이어 간다
     setv("짧은값", ""),
     IF(undone(), setv("짧은값", CLEAN(V("문장")))),
     BRANCH(AND(OR(eq(V("지난대기"), "이야기"), eq(V("지난대기"), "이유"), eq(V("지난대기"), "기분")), not_q(),
-               gt(slen(V("짧은값")), 0), lt(slen(V("짧은값")), 13), NOT(included("모름말", V("짧은값")))),
+               gt(slen(V("짧은값")), 0), lt(slen(V("짧은값")), 13), NOT(included("모름말", V("짧은값"))),
+               eq(V("신조어말"), 0)),
            setv("단어", V("짧은값")), setv("연결허용", 1), setv("템플릿", pick("말-짧은대답")),
            IF(eq(rand(1, 2), 1), STARTER())),
     BRANCH(OR(eq(V("지난대기"), "이유"), eq(V("지난대기"), "이야기")),
@@ -1078,6 +1126,19 @@ R_LAST.define(IF(undone(),
            IF(eq(rand(1, 2), 1), STARTER())),
     BRANCH(gt(slen(V("후보주제")), 1), setv("단어", V("후보주제")), setv("템플릿", pick("말-후보반응"))),
     BRANCH(eq(V("직전기분"), "나쁨"), setv("템플릿", pick("말-위로마무리"))),
+    # 이번 대화에서 아직 안 나온 지난 이야기가 있으면 (반쯤은) 그 뒤로 어떻게 됐는지 묻는다
+    setv("이야기번호", 0),
+    IF(AND(undone(), eq(rand(1, 2), 1)),
+       setv("지난k", llen("이야기주제")),
+       UNTIL(OR(lt(V("지난k"), 1), gt(V("이야기번호"), 0)), *[x for _ in range(4) for x in [
+           IF(AND(gt(V("지난k"), 0), eq(V("이야기번호"), 0)),
+              IF(NOT(included("이번주제들", item("이야기주제", V("지난k")))), setv("이야기번호", V("지난k"))),
+              chg("지난k", -1))]])),
+    BRANCH(gt(V("이야기번호"), 0),
+           DIARY_GET(V("이야기번호")),
+           setv("주제", item("이야기주제", V("이야기번호"))), append("이번주제들", V("주제")),
+           setv("템플릿", join(pick("말-맞장구"), " 그러고 보니 ", V("이야기때"), " ", V("주제"),
+                               " 이야기를 했었죠. 그 뒤로 어떻게 됐어요? [이야기]"))),
     BRANCH(eq(1, 1), setv("템플릿", pick("말-맞장구")), STARTER()),
 ))
 
@@ -1437,6 +1498,94 @@ R_SMART.define(
                                                                   " · " if i < 9 else ""]]))),
 )
 
+# ================================================================ 지난 이야기 (예전 대화 참고)
+# 주제마다 마지막으로 이야기한 날짜·감정 점수·한 말을 '이야기주제' / '이야기값'("2026-10-26|-2|수학 시험 망쳤어")에
+# 적어 두고, 기억과 함께 서버에 저장한다 (기억블롭의 '@주제=값' 줄). 대화 기록(최근 40줄)보다 오래 남는다.
+DIARY_FIND.define(
+    setv("이야기번호", 0),
+    *SCAN("이야기주제", lambda: [IF(eq(item("이야기주제", V("이야기k")), DIARY_FIND.p("주제")),
+                                   setv("이야기번호", V("이야기k")), BREAK())], 4, k="이야기k"),
+)
+DIARY_GET.define(
+    # 번호째 지난 이야기 → 이야기날짜 · 이야기월 · 이야기일 · 이야기점수 · 이야기요약 · 이야기때 ('아까', '어제', '3일 전에' …)
+    setv("지난값", item("이야기값", DIARY_GET.p("번호"))),
+    setv("이야기날짜", sub(V("지난값"), 1, 10)),
+    setv("지난나머지", HEAD(V("지난값"), 11)),
+    setv("지난위치", find(V("지난나머지"), "|")),
+    setv("이야기점수", 0), setv("이야기요약", ""),
+    IF(gt(V("지난위치"), 1),
+       setv("이야기점수", sub(V("지난나머지"), 1, minus(V("지난위치"), 1))),
+       setv("이야기요약", HEAD(V("지난나머지"), V("지난위치")))),
+    setv("이야기월", minus(sub(V("이야기날짜"), 6, 7), 0)), setv("이야기일", minus(sub(V("이야기날짜"), 9, 10), 0)),
+    setv("이야기조사", HEAD(JOSA(V("이야기요약"), "이라고"), slen(V("이야기요약")))),
+    IFELSE(eq(V("이야기날짜"), TODAY()),
+           [setv("이야기때", "아까")],
+           [setv("이야기때", join("지난번(", V("이야기월"), "월 ", V("이야기일"), "일)에")),
+            IF(eq(sub(V("이야기날짜"), 1, 4), date("YEAR")),
+               setv("지난날수", minus(DOY(date("YEAR"), date("MONTH"), date("DAY")),
+                                      DOY(date("YEAR"), V("이야기월"), V("이야기일")))),
+               IF(eq(V("지난날수"), 1), setv("이야기때", "어제")),
+               IF(AND(gt(V("지난날수"), 1), lt(V("지난날수"), 7)), setv("이야기때", join(V("지난날수"), "일 전에"))))]),
+)
+DIARY_PUT.define(
+    # 같은 주제는 지우고 맨 뒤에 다시 적는다 (맨 뒤가 가장 최근)
+    DIARY_FIND(DIARY_PUT.p("주제")),
+    IF(gt(V("이야기번호"), 0), remove("이야기주제", V("이야기번호")), remove("이야기값", V("이야기번호"))),
+    append("이야기주제", DIARY_PUT.p("주제")),
+    append("이야기값", join(TODAY(), "|", DIARY_PUT.p("점수"), "|", DIARY_PUT.p("요약"))),
+    IF(gt(llen("이야기주제"), MAX_DIARY), remove("이야기주제", 1), remove("이야기값", 1)),
+    setv("기억변경", 1),
+)
+
+
+def _past_link():
+    """지난번에도 같은 주제를 이야기했으면 대답 앞에 붙일 말 (그때와 지금의 기분을 견준다)."""
+    said = lambda head, tail: join(V("이야기때"), head, "“¤”", V("이야기조사"), tail)
+    return [
+        setv("인용글", V("이야기요약")),
+        ELIF_CHAIN(
+            (empty(V("이야기요약")), [setv("연결말", join(V("이야기때"), "도 ", V("주제"), " 이야기를 했었죠! "))]),
+            (AND(lt(V("이야기점수"), 0), gt(V("감정점수"), 0)),
+             [setv("연결말", said("는 ", " 하면서 속상해했는데, 이번엔 기분이 좋아 보여서 다행이에요! "))]),
+            (AND(lt(V("이야기점수"), 0), lt(V("감정점수"), 0)),
+             [setv("연결말", said("도 ", " 하면서 힘들어했죠… "))]),
+            (AND(gt(V("이야기점수"), 0), lt(V("감정점수"), 0)),
+             [setv("연결말", said("는 ", " 하면서 즐거워했는데, 이번엔 속상한 일이 있었군요. "))]),
+            otherwise=[setv("연결말", join(V("이야기때"), "도 ", V("주제"), " 이야기를 했었죠! 그때 “¤”",
+                                           V("이야기조사"), " 했어요. "))]),
+    ]
+
+
+_PAST_WORDS = ["지난번", "저번", "예전", "옛날에", "지난대화", "전번", "지난주", "우리전에", "내가전에", "너랑전에"]
+_PAST_ASK = ["무슨얘기", "무슨이야기", "뭔얘기", "뭐얘기", "뭘얘기", "무슨대화", "뭐라고했", "뭐라했", "무슨말했",
+             "무슨말을했", "기억나", "얘기했", "이야기했", "대화했"]
+R_PAST = Func("대답: 지난 이야기")
+R_PAST.define(
+    # "지난번에 무슨 얘기 했지?", "저번에 시험 얘기 했었나?" (생일·이름처럼 기억을 묻는 말은 '대답: 기억' 이 맡는다)
+    BRANCH(AND(OR(*[contains(m(), w_) for w_ in _PAST_WORDS], starts(m(), "전에")),
+               OR(*[contains(m(), w_) for w_ in _PAST_ASK]),
+               NOT(OR(*[contains(m(), cue) for cue, _ in D.RECALL_ALIASES]))),
+           setv("이야기번호", 0),
+           IF(gt(slen(V("주제")), 0), DIARY_FIND(V("주제"))),
+           IFELSE(gt(V("이야기번호"), 0),
+                  [DIARY_GET(V("이야기번호")), setv("인용글", V("이야기요약")),
+                   setv("답변", join(V("이야기때"), " ", V("주제"), " 이야기를 할 때 “¤”", V("이야기조사"), " 했어요."))],
+                  [IFELSE(eq(llen("이야기주제"), 0),
+                          [setv("답변", "아직 기억나는 지난 이야기가 없어요. 오늘 이야기를 들려주면 다음에 꼭 기억할게요!")],
+                          [setv("인용글", ""), setv("지난k", llen("이야기주제")),
+                           REPEAT(3, IF(gt(V("지난k"), 0),
+                                        DIARY_GET(V("지난k")),
+                                        setv("지난날", join(V("이야기월"), "월 ", V("이야기일"), "일")),
+                                        IF(eq(V("이야기때"), "아까"), setv("지난날", "오늘")),
+                                        setv("인용글", join(V("인용글"), SEP, "· ", V("지난날"), " ",
+                                                            item("이야기주제", V("지난k")), ": “", V("이야기요약"), "”")),
+                                        chg("지난k", -1))),
+                           IFELSE(gt(slen(V("주제")), 0),
+                                  [setv("답변", join(JOSA(V("주제"), "은"),
+                                                     " 기억에 없어요. 최근에는 이런 이야기를 했어요.¤"))],
+                                  [setv("답변", "기억나요! 최근에 나눈 이야기예요.¤")])])])),
+)
+
 REPLY.define(
     setv("답변", ""), setv("템플릿", ""), setv("처리됨", 0), setv("이번대기", ""), setv("새기분", ""), setv("기록가림", 0),
     setv("말투제외", 0), setv("말투변경", 0), setv("인용글", ""),
@@ -1452,7 +1601,13 @@ REPLY.define(
        setv("명령", repl(sub(V("메시지"), 1, minus(V("위치"), 1)), " ", "")),
        setv("내용", TRIM(HEAD(V("메시지"), V("위치"))))),
     # ('주사위 굴려줘' 같은 말이 엔봇이 물어본 것의 대답으로 기억되지 않게 계산·놀이를 먼저 본다)
-    R_CMD(), R_GAME(), R_SMART(), R_PENDING(), R_MEMORY(), R_TALK(), R_FEEL(), R_LAST(),
+    R_CMD(), R_GAME(), R_SMART(), R_PAST(), R_PENDING(), R_MEMORY(), R_TALK(), R_FEEL(), R_LAST(),
+    # 예전 대화 참고: 이번 대화에서 처음 나온 주제를 지난번에도 이야기했으면 그때 한 말과 기분을 꺼낸다
+    IF(AND(gt(slen(V("주제")), 0), NOT(included("이번주제들", V("주제")))),
+       append("이번주제들", V("주제")),
+       IF(AND(eq(V("연결허용"), 1), empty(V("연결말"))),
+          DIARY_FIND(V("주제")),
+          IF(gt(V("이야기번호"), 0), DIARY_GET(V("이야기번호")), *_past_link()))),
     # 마무리: 템플릿 → 답변, 대화 상태 저장
     IF(AND(eq(V("연결허용"), 1), gt(slen(V("연결말")), 0), gt(slen(V("템플릿")), 0)),
        setv("템플릿", join(V("연결말"), V("템플릿")))),
@@ -1469,6 +1624,11 @@ REPLY.define(
     IF(AND(gt(slen(V("새기분")), 0), NOT(eq(V("새기분"), V("지난기분")))),
        setv("지난기분", V("새기분")), SAVEFACT("#기분", V("새기분"))),
     IF(eq(V("말투변경"), 1), SAVEFACT("#말투", V("말투"))),
+    # 주제가 있는 이야기면 '지난 이야기' 에 적어 둔다 (다음에 같은 주제가 나오면 꺼낸다)
+    IF(AND(gt(slen(V("주제")), 0), eq(V("연결허용"), 1), not_q(), eq(V("기록가림"), 0)),
+       setv("새요약", V("문장")), IF(empty(V("새요약")), setv("새요약", V("메시지"))),
+       IF(gt(slen(V("새요약")), DIARY_SUMMARY), setv("새요약", join(sub(V("새요약"), 1, DIARY_SUMMARY), "…"))),
+       DIARY_PUT(V("주제"), V("감정점수"), V("새요약"))),
 )
 
 # ================================================================ 대화 기록 (리스트 '기록-…')
@@ -1600,6 +1760,11 @@ SAVEMEM.define(
     REPEAT(llen("내질문"),
            setv("기억블롭", join(V("기억블롭"), item("내질문", V("묶음k")), "=", item("내답변", V("묶음k")), SEP)),
            chg("묶음k", 1)),
+    # 지난 이야기는 '@주제=값' 줄로
+    setv("묶음k", 1),
+    REPEAT(llen("이야기주제"),
+           setv("기억블롭", join(V("기억블롭"), "@", item("이야기주제", V("묶음k")), "=", item("이야기값", V("묶음k")), SEP)),
+           chg("묶음k", 1)),
     _save_slot("기억저장소", "기억위치", SLOT_MEM, "기억블롭"),
 )
 LOAD.define(
@@ -1614,8 +1779,13 @@ LOAD.define(
           *SPLIT_LINE("남은문자열", "줄", "위치"),
           setv("위치", find(V("줄"), "=")),
           IF(gt(V("위치"), 1), IF(lt(V("위치"), slen(V("줄"))),
-                                 append("내질문", sub(V("줄"), 1, minus(V("위치"), 1))),
-                                 append("내답변", HEAD(V("줄"), V("위치")))))),
+             IFELSE(starts(V("줄"), "@"),
+                    # 지난 이야기 ('@시험=2026-10-26|-2|…' — 모양이 맞을 때만)
+                    [setv("지난값", HEAD(V("줄"), V("위치"))),
+                     IF(AND(gt(V("위치"), 2), gt(slen(V("지난값")), 12)), IF(eq(charat(V("지난값"), 11), "|"),
+                        append("이야기주제", sub(V("줄"), 2, minus(V("위치"), 1))), append("이야기값", V("지난값"))))],
+                    [append("내질문", sub(V("줄"), 1, minus(V("위치"), 1))),
+                     append("내답변", HEAD(V("줄"), V("위치")))])))),
     # 지난번 대화 상태
     *SCAN("내질문", lambda: [
         ELIF_CHAIN((eq(item("내질문", V("불러k")), "#최근주제"), [setv("최근주제", item("내답변", V("불러k")))]),
@@ -1660,6 +1830,7 @@ def main_script():
         setv("대기질문", ""), setv("최근주제", ""), setv("지난기분", ""), setv("직전기분", ""), setv("기억변경", 0),
         setv("지난답변", ""), setv("주제", ""), setv("단어", ""), setv("키표시", ""), setv("값", ""), setv("감정점수", 0),
         setv("말투", "존댓말"), setv("말투제외", 0), setv("끝말", ""), clear("쓴말"),
+        setv("인용글", ""), clear("이야기주제"), clear("이야기값"), clear("이번주제들"),
         IFELSE(eq(slen(repl(V("아이디"), " ", "")), 0),
                [setv("로그인", 0), setv("저장가능", 0), setv("호칭", "방문자"), setv("템플릿", pick("말-환영손님"))],
                [setv("로그인", 1), setv("저장가능", 1),
@@ -1670,13 +1841,26 @@ def main_script():
                 LOAD(),
                 ELIF_CHAIN(
                     (AND(empty(V("기록블롭")), eq(llen("내질문"), 0)), [setv("템플릿", pick("말-환영처음"))]),
-                    (gt(slen(V("최근주제")), 0), [setv("주제", V("최근주제")), setv("템플릿", pick("말-환영주제"))]),
+                    (gt(slen(V("최근주제")), 0),
+                     [setv("주제", V("최근주제")), append("이번주제들", V("주제")),
+                      setv("템플릿", pick("말-환영주제")),
+                      # 그 주제로 마지막에 한 말이 있으면 그 말을 꺼낸다
+                      DIARY_FIND(V("주제")),
+                      IF(gt(V("이야기번호"), 0), DIARY_GET(V("이야기번호")),
+                         IF(gt(slen(V("이야기요약")), 0),
+                            setv("인용글", V("이야기요약")),
+                            setv("템플릿", join("{이름}님, 다시 왔군요! ", V("이야기때"), " “¤”", V("이야기조사"), " 했었죠. ")),
+                            ELIF_CHAIN(
+                                (lt(V("이야기점수"), 0), [setv("템플릿", join(V("템플릿"), "그 뒤로 좀 괜찮아졌어요? [기분]"))]),
+                                (gt(V("이야기점수"), 0), [setv("템플릿", join(V("템플릿"), "요즘도 그래요? 😊 [이야기]"))]),
+                                otherwise=[setv("템플릿", join(V("템플릿"), "그 뒤로 어떻게 됐어요? [이야기]"))])))]),
                     (eq(V("지난기분"), "나쁨"), [setv("템플릿", pick("말-환영기분"))]),
                     otherwise=[setv("템플릿", pick("말-환영"))]),
                 IF(eq(V("저장가능"), 0), PRINT("저장 서버에 연결하지 못해서 이번 대화는 저장되지 않아요.", "알림"))]),
         setv("이번대기", ""),
         setv("답변", FILL(V("템플릿"))),
         IF(eq(V("말투"), "반말"), setv("답변", STYLE(V("답변")))),
+        IF(gt(slen(V("인용글")), 0), setv("답변", repl(V("답변"), "¤", V("인용글")))),
         setv("대기질문", V("이번대기")),
         PRINT(V("답변"), "봇"),
         setv("보인답변", V("답변")),
@@ -1810,6 +1994,7 @@ def build():
         lst("월일수", D.MONTH_DAYS), lst("월누적", [sum(D.MONTH_DAYS[:i]) for i in range(12)]),
         lst("불용어", D.STOPWORDS), lst("조사목록", D.JOSA_SUFFIXES), lst("형용사", D.ADJ_STEMS), lst("요일", D.WEEKDAYS),
         lst("예말", D.YES_WORDS), lst("모름말", D.NON_ANSWERS), lst("뒤집는말", D.NEGATORS),
+        lst("신조어목록", SLANG_FORMS), lst("이야기주제"), lst("이야기값"), lst("이번주제들"),
         lst("주제뒤말", D.HA_TAILS), lst("끝말목록", _TAILS),
         *[lst(name, phrases) for name, phrases in D.PHRASES.items()],
         lst("대화기록", realtime=True), lst("기억저장소", realtime=True),
