@@ -136,6 +136,13 @@ def append(lst, v): return blk("add_value_to_list", [w(v), LISTS[lst], None])
 def remove(lst, i): return blk("remove_value_from_list", [w(i), LISTS[lst], None])
 def setitem(lst, i, v): return blk("change_value_list_index", [LISTS[lst], w(i), w(v), None])
 def clear(lst): return REPEAT(llen(lst), remove(lst, 1))
+
+
+def clear_many(lists, unroll=8):
+    """여러 리스트를 한꺼번에 비운다. 엔트리에는 리스트 비우기 블록이 없어서 한 항목씩 지워야 하는데,
+    (부스트 모드가 아니면) 반복 한 바퀴가 한 프레임이므로 한 바퀴에 리스트마다 unroll 개씩 지운다."""
+    return UNTIL(AND(*[eq(llen(l), 0) for l in lists]) if len(lists) > 1 else eq(llen(lists[0]), 0),
+                 *[IF(gt(llen(l), 0), remove(l, 1)) for _ in range(unroll) for l in lists])
 def IF(cond, *body): return blk("_if", [cond, None], [list(body)])
 def IFELSE(cond, then, els): return blk("if_else", [cond, None, None], [list(then), list(els)])
 def REPEAT(n, *body): return blk("repeat_basic", [w(n), None], [list(body)])

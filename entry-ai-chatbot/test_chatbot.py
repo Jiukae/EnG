@@ -343,7 +343,9 @@ class StructureTest(unittest.TestCase):
 
 
 # ------------------------------------------------------------------ 대화 도우미
-def chat(server, user, inputs, nick="민수", seed=0):
+def chat(server, user, inputs, nick="민수", seed=0, save=False):
+    """대화를 돌린다. save=True 면 마지막에 /save 해서 다음 접속 때 이어지게 한다."""
+    inputs = list(inputs) + (["/save"] if save else [])
     return Session(PROJECT, server, username=user, nickname=nick, inputs=inputs, seed=seed).run()
 
 
@@ -383,8 +385,9 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual(rows[-1][1], "bot")
         for k in range(1, 10):
             self.assertFalse(s.obj(f"봇칸{k}")["visible"] and s.obj(f"나칸{k}")["visible"])
-        self.assertEqual(s.obj("상태")["text"], "● 민수님과 대화 중")
+        self.assertEqual(s.obj("상태")["text"], "● 민수님 · 저장 안 됨")  # /save 전
         self.assertIsNone(s.obj("엔봇")["dialog"], "묻기 말풍선은 지워져야 함")
+        self.assertEqual(chat({}, "ui3", ["안녕"], save=True).obj("상태")["text"], "● 민수님과 대화 중")
 
     def test_thinking_row_removed(self):
         s = chat({}, "ui2", ["안녕"])
@@ -412,7 +415,7 @@ class ConversationTest(unittest.TestCase):
 
     def test_learns_facts_from_story_and_recalls_next_visit(self):
         server = {}
-        s = chat(server, "c", ["나 고양이 키워", "나비", "내 생일은 3월 14일이야", "나는 피자를 좋아해", "나 12살이야"])
+        s = chat(server, "c", ["나 고양이 키워", "나비", "내 생일은 3월 14일이야", "나는 피자를 좋아해", "나 12살이야"], save=True)
         mem = memory(s)
         self.assertEqual(mem["내 고양이 이름"], "F:나비")
         self.assertEqual(mem["내 생일"], "F:3월 14일")
@@ -434,13 +437,13 @@ class ConversationTest(unittest.TestCase):
 
     def test_welcome_back_remembers_topic_and_mood(self):
         server = {}
-        chat(server, "d", ["오늘 시험 망쳤어"])
+        chat(server, "d", ["오늘 시험 망쳤어"], save=True)
         s = chat(server, "d", [])
         welcome = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
         # 그 주제로 마지막에 한 말을 꺼내고, 그때 속상해했으니 괜찮아졌는지 묻는다
         self.assertEqual(welcome, "민수님, 다시 왔군요! 아까 “오늘 시험 망쳤어”라고 했었죠. 그 뒤로 좀 괜찮아졌어요?")
         server = {}
-        chat(server, "e", ["아 진짜 짜증나"])
+        chat(server, "e", ["아 진짜 짜증나"], save=True)
         s = chat(server, "e", [])
         welcome = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
         self.assertIn(welcome.replace("민수", "{이름}"), [t.replace(" [기분]", "") for t in D.PHRASES["말-환영기분"]])
@@ -448,7 +451,7 @@ class ConversationTest(unittest.TestCase):
     def test_learns_unknown_words_and_questions(self):
         server = {}
         s = chat(server, "f", ["블랙홀이 뭐야?", "양자컴퓨터가 뭐야?", "양자의 원리로 계산하는 컴퓨터야",
-                               "우리 학교 이름이 뭐게?", "한빛초등학교야"])
+                               "우리 학교 이름이 뭐게?", "한빛초등학교야"], save=True)
         r = bot_replies(s)
         self.assertTrue(r[0].startswith("블랙홀은 중력이"))
         self.assertIn("양자컴퓨터", r[1])
@@ -476,7 +479,7 @@ class ConversationTest(unittest.TestCase):
 
     def test_name(self):
         server = {}
-        s = chat(server, "j", ["내 이름은 지호야", "내 이름 뭐라고?"])
+        s = chat(server, "j", ["내 이름은 지호야", "내 이름 뭐라고?"], save=True)
         r = bot_replies(s)
         self.assertIn("지호님이라고 부를게요", r[0])
         self.assertEqual(r[1], "지호님이잖아요! 잘 기억하고 있어요.")
@@ -487,8 +490,8 @@ class ConversationTest(unittest.TestCase):
 class StorageTest(unittest.TestCase):
     def test_users_are_separate(self):
         server = {}
-        chat(server, "minsu01", ["내 생일은 3월 14일이야"])
-        s = chat(server, "jiyoung", ["내 생일 언제라고 했지?", "기억 목록"], nick="지영")
+        chat(server, "minsu01", ["내 생일은 3월 14일이야"], save=True)
+        s = chat(server, "jiyoung", ["내 생일 언제라고 했지?", "기억 목록"], nick="지영", save=True)
         self.assertNotIn("3월14일", flat(" ".join(bot_replies(s))))
         hist = server[s.list_names["대화기록"]]
         mem = server[s.list_names["기억저장소"]]
@@ -497,7 +500,7 @@ class StorageTest(unittest.TestCase):
 
     def test_prefix_ids_do_not_collide(self):
         server = {}
-        chat(server, "ab", ["기억해: 색 = 빨강"])
+        chat(server, "ab", ["기억해: 색 = 빨강"], save=True)
         s = chat(server, "a", ["기억 목록"])
         self.assertIn("아직 기억하고 있는 게 없어요", bot_replies(s)[0])
         s = chat(server, "ab", ["색 알려줘"])
@@ -513,7 +516,7 @@ class StorageTest(unittest.TestCase):
 
     def test_history_is_trimmed(self):
         server = {}
-        s = chat(server, "u", [f"메시지 {i}" for i in range(25)] + ["가" * 300])
+        s = chat(server, "u", [f"메시지 {i}" for i in range(25)] + ["가" * 300], save=True)
         blob = server[s.list_names["대화기록"]][0]
         self.assertTrue(blob.startswith("u|"))
         self.assertEqual(blob.count("¶"), MAX_HISTORY_LINES)
@@ -521,17 +524,60 @@ class StorageTest(unittest.TestCase):
         self.assertEqual(len(line), 1)
         self.assertEqual(len(line[0]), MAX_LINE_LEN + 1)
 
-    def test_new_chat_and_forget(self):
+    def test_saved_only_with_save_command(self):
         server = {}
-        chat(server, "k", ["내 생일은 3월 14일이야", "안녕"])
-        s = chat(server, "k", ["새 대화", "잊어줘: 내 생일", "잊어줘: 없는거", "기억 목록"])
+        s = chat(server, "s1", ["내 생일은 3월 14일이야", "안녕"])
+        self.assertEqual(server[s.list_names["대화기록"]], ["s1|"])  # 칸만 있고 내용은 없다
+        self.assertEqual(server[s.list_names["기억저장소"]], ["s1|"])
+        s = chat(server, "s1", ["내 생일 언제라고 했지?"])
+        self.assertIn("아직", bot_replies(s)[0])
+        self.assertNotIn("3월 14일", bot_replies(s)[0])
+        s = chat(server, "s1", ["내 생일은 3월 14일이야", "/save"])
+        self.assertEqual(bot_replies(s)[1], "저장했어요! 💾 다음에 들어와도 지금까지의 대화와 기억이 이어져요.")
+        self.assertIn("3월 14일", bot_replies(chat(server, "s1", ["내 생일 언제라고 했지?"]))[0])
+        # 다른 말로도 저장, 로그인하지 않으면 저장할 수 없다고 알려 준다
+        self.assertIn("저장했어요", bot_replies(chat({}, "s2", ["저장"]))[0])
+        s = Session(PROJECT, {}, username=None, nickname=None, inputs=["/save"]).run()
+        self.assertIn("로그인했을 때만", bot_replies(s)[0])
+
+    def test_end_asks_to_save_first(self):
+        s = chat({}, "s3", ["안녕", "종료", "종료", "남는 말"])
         r = bot_replies(s)
-        self.assertIn("대화 기록을 지웠어요", r[0])
-        self.assertIn("기억을 지웠어요", r[1])
-        self.assertIn("기억은 없어요", r[2])
+        self.assertIn("아직 저장하지 않은 대화가 있어요", r[1])
+        self.assertIn("즐거웠어요", r[2])
+        self.assertEqual(s.inputs, ["남는 말"])
+        s = chat({}, "s4", ["안녕", "/save", "종료", "남는 말"])
+        self.assertIn("즐거웠어요", bot_replies(s)[2])  # 저장했으면 바로 끝낸다
+        s = chat({}, "s5", ["안녕", "종료", "고마워", "종료"])
+        self.assertIn("아직 저장하지 않은 대화가 있어요", bot_replies(s)[3])  # 다른 말을 했으면 다시 묻는다
+
+    def test_new_clear_and_forget(self):
+        server = {}
+        chat(server, "k", ["내 생일은 3월 14일이야", "나 고양이 키워", "나비", "안녕"], save=True)
+        s = chat(server, "k", ["끝말잇기", "/new", "잊어줘: 내 생일", "잊어줘: 없는거", "기억 목록"])
+        lines = [(tag, t) for tag, t, _ in s.transcript_lines()]
+        i = lines.index(("나", "/new"))
+        self.assertEqual(lines[i + 1:i + 3], [("알림", "── 새 대화 ──"), ("봇", "새 대화를 시작해요! 오늘은 무슨 이야기를 해 볼까요?")])
+        self.assertFalse(any("끝말잇기" in row for row in s.lst("화면글")))  # 화면은 새로
+        r = bot_replies(s)[1:]  # (끝말잇기 대답 다음부터: '/new' 대답은 알림 줄 뒤에 있다)
+        self.assertEqual(s.var("끝말"), "")  # 놀이도 새로
+        self.assertIn("안녕", [x[6] for x in records(s)])  # /new 는 기록을 지우지 않는다
+        self.assertIn("기억을 지웠어요", r[0])
+        self.assertIn("기억은 없어요", r[1])
         self.assertNotIn("내 생일", memory(s))
-        hist = server[s.list_names["대화기록"]][0]
-        self.assertNotIn("안녕", hist)
+        # /clear: 기록만 지우고 기억은 남긴다 (저장하면 서버 기록도 비워진다)
+        s = chat(server, "k", ["/clear", "기억 목록", "/save"])
+        self.assertIn("대화 기록을 지웠어요", bot_replies(s)[0])
+        self.assertIn("내 고양이", bot_replies(s)[1])
+        self.assertNotIn("안녕", server[s.list_names["대화기록"]][0])
+        # /clear all: 기억과 지난 이야기까지
+        s = chat(server, "k", ["/clear all", "기억 목록", "지난번에 무슨 얘기 했지?"])
+        r = bot_replies(s)
+        self.assertIn("모두 지웠어요", r[0])
+        self.assertIn("아직 기억하고 있는 게 없어요", r[1])
+        self.assertIn("아직 기억나는 지난 이야기가 없어요", r[2])
+        # 저장하지 않았으니 다음에 오면 그대로다
+        self.assertIn("내 고양이", bot_replies(chat(server, "k", ["기억 목록"]))[0])
 
     def test_save_failure_is_reported(self):
         class Rejecting(list):
@@ -542,9 +588,10 @@ class StorageTest(unittest.TestCase):
             def setdefault(self, k, v):
                 return super().setdefault(k, Rejecting(v))
 
-        s = chat(Server(), "x", ["기억해: a = b", "a"])
+        s = chat(Server(), "x", ["기억해: a = b", "a", "/save"])
         self.assertIn("저장 서버에 연결하지 못해서", " ".join(t for _, t, _ in s.transcript_lines()))
-        self.assertEqual(bot_replies(s)[-1], "b")
+        self.assertEqual(bot_replies(s)[1], "b")
+        self.assertIn("저장 서버에 연결하지 못해서 지금은 저장할 수 없어요", bot_replies(s)[2])
 
 
 class CommandTest(unittest.TestCase):
@@ -556,13 +603,13 @@ class CommandTest(unittest.TestCase):
         self.assertEqual(bot_replies(s), list(cases.values()))
 
     def test_translate_help_time(self):
-        s = chat({}, "n", ["번역: 안녕하세요", "한국어로: hello", "도움말", "몇 시야?", "종료", "안 읽힘"])
+        s = chat({}, "n", ["번역: 안녕하세요", "한국어로: hello", "도움말", "몇 시야?", "/save", "종료", "안 읽힘"])
         r = bot_replies(s)
         self.assertIn("<en:안녕하세요>", r[0])
         self.assertIn("<ko:hello>", r[1])
         self.assertIn("편하게 이야기해 보세요", r[2])
         self.assertEqual(r[3], "지금은 14시 5분이에요.")
-        self.assertIn("즐거웠어요, 민수님", r[4])
+        self.assertIn("즐거웠어요, 민수님", r[5])
         self.assertEqual(s.inputs, ["안 읽힘"])
         self.assertEqual(s.obj("상태")["text"], "● 대화 종료")
 
@@ -602,9 +649,9 @@ class RecordTest(unittest.TestCase):
 
     def test_records_are_rebuilt_from_server_on_next_visit(self):
         server = {}
-        first = chat(server, "r2", ["나 고양이 키워", "나비", "오늘 학교에서 발표했어"])
+        first = chat(server, "r2", ["나 고양이 키워", "나비", "오늘 학교에서 발표했어"], save=True)
         again = chat(server, "r2", [])
-        self.assertEqual(records(again), records(first))
+        self.assertEqual(records(again), records(first))  # ('/save' 한 줄과 그 대답까지 저장된다)
         self.assertEqual(records(again)[4][4], "발표")  # '발표했어' 에서 주제 낱말을 찾는다
 
     def test_old_history_format_is_read(self):
@@ -631,21 +678,22 @@ class RecordTest(unittest.TestCase):
         s = chat({}, "r5", ["기록 검색: 없는말"])
         self.assertIn("기록은 없어요", bot_replies(s)[0])
 
-    def test_new_chat_clears_records(self):
-        s = chat({}, "r6", ["안녕", "오늘 재밌었어", "새 대화"])
-        self.assertEqual([r[6] for r in records(s)], ["새 대화", records(s)[1][6]])
+    def test_clear_empties_records(self):
+        s = chat({}, "r6", ["안녕", "오늘 재밌었어", "/clear"])
+        self.assertEqual([r[6] for r in records(s)], ["/clear", records(s)[1][6]])
         self.assertEqual(len(records(s)), 2)
 
     def test_works_when_tables_are_missing(self):
         """엔트리 웹에서 불러와 테이블이 빠져도 기록표를 켜기 전에는 테이블 블록을 쓰지 않는다."""
         project = without_tables(PROJECT)
         inputs = ["안녕", "오늘 시험 망쳤어", "수학", "나 고양이 키워", "나비", "블랙홀이 뭐야?", "수수께끼", "ㅋㅋ",
-                  "기록표", "기록 검색: 나비", "기록 통계", "기억 목록", "새 대화", "기록표 끄기", "도움말", "?",
+                  "기록표", "기록 검색: 나비", "기록 통계", "기억 목록", "/new", "/clear", "/save", "/clear all",
+                  "기록표 끄기", "도움말", "?",
                   "반말 써", "끝말잇기", "기차", "그만", "가위바위보", "보", "그만", "3 곱하기 4는?", "디데이",
                   "방금 내가 뭐라고 했어?", "존댓말 써", "야르", "ㅎㅇ", "헐", "킹받네", "ㅇㅇ", "지난번에 무슨 얘기 했지?",
                   "저번에 시험 얘기 했었나?"]
         server = {}
-        Session(project, server, username="t1", nickname="민수", inputs=inputs).run()
+        Session(project, server, username="t1", nickname="민수", inputs=inputs + ["/save"]).run()
         Session(project, server, username="t1", nickname="민수", inputs=["안녕", "기록표"]).run()
         Session(project, {}, username=None, nickname=None, inputs=inputs).run()
         with self.assertRaises(EntryError):  # 켜면 테이블이 있어야 한다
@@ -663,7 +711,7 @@ class RecordTest(unittest.TestCase):
         self.assertNotIn("안내", [r[3] for r in table])
 
     def test_table_keeps_up_when_old_records_are_trimmed(self):
-        inputs = ["기록표 켜기"] + [f"메시지 {i}" for i in range(MAX_RECORDS // 2 + 5)] + ["새 대화", "안녕"]
+        inputs = ["기록표 켜기"] + [f"메시지 {i}" for i in range(MAX_RECORDS // 2 + 5)] + ["/clear", "안녕"]
         s = chat({}, "r8", inputs[:-2])
         self.assertEqual(len(records(s)), MAX_RECORDS)
         self.assertEqual(as_text(s.table("대화기록표")["rows"]), as_text(records(s)))
@@ -715,7 +763,7 @@ HONORIFIC = re.compile(r"니다|세요|에요|예요|해요|어요|아요|군요
 class BanmalTest(unittest.TestCase):
     def test_banmal_on_off_and_saved(self):
         server = {}
-        s = chat(server, "b1", ["반말 써", "안녕", "오늘 너무 피곤해", "고마워", "반말해"])
+        s = chat(server, "b1", ["반말 써", "안녕", "오늘 너무 피곤해", "고마워", "반말해"], save=True)
         r = bot_replies(s)
         self.assertEqual(r[0], "좋아! 이제부터 편하게 말할게. 다시 존댓말이 좋으면 '존댓말 써'라고 해 줘.")
         for reply in r[1:]:
@@ -832,23 +880,25 @@ class SmartTest(unittest.TestCase):
 
 def next_letters(reply):
     m = re.search(r"'(.)'(?: 또는 '(.)')?(?:으로|로) 시작하는 말", reply)
-    return {c for c in m.groups() if c}
+    return {c for c in m.groups() if c} if m else set()
 
 
 class WordChainTest(unittest.TestCase):
     words = list_data("끝말단어")
 
     def word_for(self, letters, used=()):
-        return next(w for w in self.words if w[0] in letters and w not in used)
+        return next((w for w in self.words if w[0] in letters and w not in used), None)
 
     def test_play_several_rounds(self):
         used = set()
 
         def answer(s):
             last = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
-            if "시작하는 말이 생각 안 나요" in last:  # 엔봇이 졌으면 끝
+            if not next_letters(last):  # 엔봇이 졌으면 끝
                 return "그만"
             word = self.word_for(next_letters(last), used | set(s.lst("쓴말")))
+            if word is None:  # 이을 낱말을 모르면 진다
+                return "그만"
             used.add(word)
             return word
         s = play(["끝말잇기"] + [answer] * 6 + ["그만"], seed=4)
@@ -878,7 +928,7 @@ class WordChainTest(unittest.TestCase):
         self.assertEqual(r[4], "두 글자 이상인 낱말로 말해 주세요!")
         self.assertRegex(r[5], "^사[가-힣]*! 이번엔 ")  # 두음법칙: '력' 차례에 '역사'
         self.assertEqual(r[6], "으… '냥'으로 시작하는 말이 생각 안 나요. 민수님이 이겼어요! 🎉")
-        self.assertEqual(r[7], "오늘 이야기 즐거웠어요, 민수님! 다시 이야기하려면 시작 버튼을 눌러 주세요.")
+        self.assertTrue(r[7].startswith("아직 저장하지 않은 대화가 있어요"), r[7])  # 놀이가 끝난 뒤의 '그만' 은 끝내기
 
     def test_hint_mentions_dueum(self):
         # 엔봇이 고를 낱말이 모두 두음법칙 글자('력', '녀'…)로 끝나는 첫 글자를 찾아서 그 글자로 끝나는 말을 한다
@@ -986,8 +1036,10 @@ class SlangTest(unittest.TestCase):
 
 # ------------------------------------------------------------------ 지난 이야기 (예전 대화 참고)
 def visit(server, inputs, day, seed=0):
+    """그날 접속해서 이야기하고 /save 한다."""
     now = datetime.datetime(2026, 10, 26, 14, 5) + datetime.timedelta(days=day)
-    return Session(PROJECT, server, username="past", nickname="민수", inputs=inputs, seed=seed, now=now).run()
+    return Session(PROJECT, server, username="past", nickname="민수", inputs=list(inputs) + ["/save"], seed=seed,
+                   now=now).run()
 
 
 def welcome_of(s):

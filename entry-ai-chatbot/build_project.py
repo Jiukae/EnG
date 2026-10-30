@@ -32,7 +32,7 @@ import time
 import data as D
 from dsl import (AND, ASK, BG, BREAK, CAST, ELIF_CHAIN, FG, FUNCS, HIDE, HIDE_ANSWER, IF, IFELSE, LISTS, MSGS,
                  NOT, OR, REPEAT, SCAN, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNSAY, UNTIL, V, VARS, WAIT,
-                 WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, contains, count, date,
+                 WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, clear_many, contains, count, date,
                  empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, mod, nickname, quot,
                  pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount,
                  translate, username, walk_blocks)
@@ -682,7 +682,6 @@ SAVEFACT.define(
            [setitem("내답변", V("찾은키번호"), SAVEFACT.p("값"))],
            [append("내질문", V("저장키")), append("내답변", SAVEFACT.p("값")),
             IF(gt(llen("내질문"), MAX_MEMORIES), remove("내질문", 1), remove("내답변", 1))]),
-    setv("기억변경", 1),
 )
 RECALL.define(
     # 키 → 템플릿 (기억하고 있으면 대답, 모르면 물어보기)
@@ -824,7 +823,9 @@ HELP = SEP.join([
     "짜장면이랑 짬뽕 중에 뭐 먹을까? · 반말 써 / 존댓말 써",
     "지난번에 무슨 얘기 했지? · 야르 · ㅎㅇ · 킹받다가 뭐야?",
     "번역: 문장 · 한국어로: sentence · 계산: 12*3",
-    "몇 시야? · 새 대화 · 종료",
+    "몇 시야? · 종료",
+    "/new 새 대화 · /clear 기록 지우기 · /clear all 모두 지우기",
+    "/save 저장 (저장해야 다음에 들어와도 이어져요)",
 ])
 TEACH_FORMAT = "이렇게 입력해 주세요 → 기억해: 질문 = 답 (예: 기억해: 내 별명 = 꼬마)"
 m = lambda: V("정리메시지")
@@ -834,6 +835,10 @@ not_q = lambda: eq(V("질문여부"), 0)
 undone = lambda: eq(V("처리됨"), 0)
 
 sensitive = lambda v: OR(*[contains(v, w_) for w_ in D.SENSITIVE])
+# 끝내는 말 ('그만', '끝' 은 놀이 중이면 놀이만 끝낸다)
+_is_end = lambda: OR(eq(m(), "종료"), eq(m(), "bye"), eq(m(), "/exit"),
+                     AND(OR(eq(m(), "그만"), eq(m(), "끝")),
+                         NOT(OR(eq(V("지난대기"), "끝말잇기"), eq(V("지난대기"), "가위바위보")))))
 R_CMD.define(
     # 위기 신호는 무엇보다 먼저 받아 준다
     BRANCH(OR(*[contains(m(), w_) for w_ in D.CRISIS]), setv("템플릿", pick("말-위기")), setv("새기분", "나쁨")),
@@ -861,15 +866,16 @@ R_CMD.define(
                            IF(gt(slen(V("저장값")), 100), setv("저장값", sub(V("저장값"), 1, 100))),
                            SAVEFACT(V("키"), V("저장값")),
                            setv("답변", join("알겠어요! 앞으로 '", V("키"), "'(이)라고 물으면 '", V("저장값"), "'(이)라고 답할게요.")),
-                           IF(eq(V("저장가능"), 0),
-                              setv("답변", join(V("답변"), " (저장되지 않는 상태라 이번 실행에서만 기억해요.)")))])])],
+                           IFELSE(eq(V("저장가능"), 0),
+                                  [setv("답변", join(V("답변"), " (저장되지 않는 상태라 이번 실행에서만 기억해요.)"))],
+                                  [setv("답변", join(V("답변"), " (/save 하면 다음에도 기억해요.)"))])])])],
                   [setv("답변", TEACH_FORMAT)])),
     BRANCH(cmd("잊어줘", "잊어", "삭제"),
            IFELSE(empty(V("내용")),
                   [setv("답변", "이렇게 입력해 주세요 → 잊어줘: 내 생일")],
                   [FINDMEM(V("내용")),
                    IFELSE(gt(V("찾은키번호"), 0),
-                          [remove("내질문", V("찾은키번호")), remove("내답변", V("찾은키번호")), setv("기억변경", 1),
+                          [remove("내질문", V("찾은키번호")), remove("내답변", V("찾은키번호")),
                            setv("답변", join("'", V("내용"), "'에 대한 기억을 지웠어요."))],
                           [setv("답변", join("'", V("내용"), "'(이)라는 기억은 없어요. '기억 목록'으로 확인해 보세요."))])])),
     BRANCH(cmd("번역", "영어로", "영어"),
@@ -920,12 +926,38 @@ R_CMD.define(
            IFELSE(eq(V("요약수"), 0),
                   [setv("답변", "아직 기억하고 있는 게 없어요. 이야기를 들려주면 하나씩 기억할게요!")],
                   [setv("답변", join("기억하고 있는 것 ", V("요약수"), "개예요.", V("답변")))])),
-    BRANCH(OR(eq(m(), "새대화"), eq(m(), "초기화"), eq(m(), "기록삭제")),
+    # /new: 화면과 대화 흐름(놀이, 물어본 것, 이번에 나온 주제)만 새로 — 기록과 기억은 그대로
+    BRANCH(OR(eq(m(), "/new"), eq(m(), "/새대화"), eq(m(), "새대화"), eq(m(), "새로시작")),
+           clear("화면글"), clear("화면종류"), PRINT("── 새 대화 ──", "알림"),
+           setv("끝말", ""), clear("쓴말"), setv("가위내점수", 0), setv("가위봇점수", 0), clear("이번주제들"),
+           setv("템플릿", "새 대화를 시작해요! 오늘은 무슨 이야기를 해 볼까요? [이야기]")),
+    # /clear all: 기록에 기억과 지난 이야기까지 모두 / /clear: 대화 기록만
+    BRANCH(OR(eq(m(), "/clearall"), eq(m(), "/모두지우기"), eq(m(), "모두지우기"), eq(m(), "전부지우기"), eq(m(), "초기화")),
            setv("기록블롭", ""), clear("화면글"), clear("화면종류"), CLEARLOG(),
-           setv("답변", "대화 기록을 지웠어요. 새로 시작해요! (기억하고 있는 건 그대로예요.)")),
-    BRANCH(OR(eq(m(), "종료"), eq(m(), "bye"),
-              AND(OR(eq(m(), "그만"), eq(m(), "끝")),
-                  NOT(OR(eq(V("지난대기"), "끝말잇기"), eq(V("지난대기"), "가위바위보"))))),
+           clear_many(["내질문", "내답변", "이야기주제", "이야기값", "이번주제들"]),
+           setv("최근주제", ""), setv("지난기분", ""), setv("말투", "존댓말"),
+           IFELSE(eq(V("로그인"), 1),
+                  [setv("호칭", V("닉네임")), IF(eq(slen(repl(V("호칭"), " ", "")), 0), setv("호칭", V("아이디")))],
+                  [setv("호칭", "방문자")]),
+           setv("답변", "대화 기록과 기억을 모두 지웠어요. 처음 만난 것처럼 새로 시작해요! "
+                      "(저장된 것까지 지우려면 /save 해 주세요.)")),
+    BRANCH(OR(eq(m(), "/clear"), eq(m(), "/지우기"), eq(m(), "기록지우기"), eq(m(), "기록삭제")),
+           setv("기록블롭", ""), clear("화면글"), clear("화면종류"), CLEARLOG(),
+           setv("답변", "대화 기록을 지웠어요. 기억하고 있는 건 그대로예요. "
+                      "(저장된 기록까지 지우려면 /save, 기억까지 지우려면 /clear all)")),
+    # /save: 지금까지의 대화와 기억을 서버(실시간 리스트)에 저장한다 (실제 저장은 이 말까지 기록한 뒤에)
+    BRANCH(OR(eq(m(), "/save"), eq(m(), "/저장"), eq(m(), "저장"), eq(m(), "저장해"), eq(m(), "저장해줘")),
+           ELIF_CHAIN(
+               (eq(V("로그인"), 0), [setv("답변", "저장은 로그인했을 때만 할 수 있어요. 로그인하고 다시 실행해 주세요!")]),
+               (eq(V("저장가능"), 0), [setv("답변", "저장 서버에 연결하지 못해서 지금은 저장할 수 없어요. "
+                                                     "작품 공유 페이지에서 실행해 주세요.")]),
+               otherwise=[setv("저장요청", 1),
+                          setv("답변", "저장했어요! 💾 다음에 들어와도 지금까지의 대화와 기억이 이어져요.")])),
+    # 저장하지 않은 대화가 있으면 끝내기 전에 한 번 묻는다
+    BRANCH(AND(_is_end(), eq(V("로그인"), 1), eq(V("저장가능"), 1), eq(V("저장할것"), 1), eq(V("지난종료물음"), 0)),
+           setv("종료물음", 1),
+           setv("답변", "아직 저장하지 않은 대화가 있어요. 저장하려면 /save, 저장하지 않고 끝내려면 한 번 더 '종료'라고 해 주세요.")),
+    BRANCH(_is_end(),
            setv("대화중", 0),
            setv("템플릿", "오늘 이야기 즐거웠어요, {이름}님! 다시 이야기하려면 시작 버튼을 눌러 주세요.")),
 )
@@ -1567,7 +1599,6 @@ DIARY_PUT.define(
     append("이야기주제", DIARY_PUT.p("주제")),
     append("이야기값", join(TODAY(), "|", DIARY_PUT.p("점수"), "|", DIARY_PUT.p("요약"))),
     IF(gt(llen("이야기주제"), MAX_DIARY), remove("이야기주제", 1), remove("이야기값", 1)),
-    setv("기억변경", 1),
 )
 
 
@@ -1622,6 +1653,7 @@ R_PAST.define(
 REPLY.define(
     setv("답변", ""), setv("템플릿", ""), setv("처리됨", 0), setv("이번대기", ""), setv("새기분", ""), setv("기록가림", 0),
     setv("말투제외", 0), setv("말투변경", 0), setv("인용글", ""),
+    setv("지난종료물음", V("종료물음")), setv("종료물음", 0),
     setv("지난대기", V("대기질문")), setv("대기질문", ""),
     clear("후보답변"),
     ANALYZE(),
@@ -1702,7 +1734,7 @@ PARSELINE.define(
             setv("줄내용", HEAD(V("줄남은"), 3)),
             setv("줄날짜", "-"), setv("줄시각", "-"), setv("줄주제", "-"), setv("줄감정", "-")]),
 )
-CLEARLOG.define(*[clear(REC[col]) for col in REC], setv("기록번호", 0), setv("표다시", 1))
+CLEARLOG.define(clear_many(list(REC.values())), setv("기록번호", 0), setv("표다시", 1))
 
 _row = lambda col: rec(col, V("검색k"))
 SEARCH.define(
@@ -1860,7 +1892,8 @@ def main_script():
         setv("아이디", username()),
         setv("닉네임", nickname()),
         setv("기록블롭", ""), setv("기억블롭", ""), setv("기록위치", 0), setv("기억위치", 0),
-        setv("대기질문", ""), setv("최근주제", ""), setv("지난기분", ""), setv("직전기분", ""), setv("기억변경", 0),
+        setv("대기질문", ""), setv("최근주제", ""), setv("지난기분", ""), setv("직전기분", ""),
+        setv("저장할것", 0), setv("저장요청", 0), setv("종료물음", 0),
         setv("지난답변", ""), setv("주제", ""), setv("단어", ""), setv("키표시", ""), setv("값", ""), setv("감정점수", 0),
         setv("말투", "존댓말"), setv("말투제외", 0), setv("끝말", ""), clear("쓴말"),
         setv("인용글", ""), clear("이야기주제"), clear("이야기값"), clear("이번주제들"),
@@ -1889,7 +1922,9 @@ def main_script():
                                 otherwise=[setv("템플릿", join(V("템플릿"), "그 뒤로 어떻게 됐어요? [이야기]"))])))]),
                     (eq(V("지난기분"), "나쁨"), [setv("템플릿", pick("말-환영기분"))]),
                     otherwise=[setv("템플릿", pick("말-환영"))]),
-                IF(eq(V("저장가능"), 0), PRINT("저장 서버에 연결하지 못해서 이번 대화는 저장되지 않아요.", "알림"))]),
+                IFELSE(eq(V("저장가능"), 0),
+                       [PRINT("저장 서버에 연결하지 못해서 이번 대화는 저장되지 않아요.", "알림")],
+                       [PRINT("💾 저장은 /save · 새 대화 /new", "알림")])]),
         setv("이번대기", ""),
         setv("답변", FILL(V("템플릿"))),
         IF(eq(V("말투"), "반말"), setv("답변", STYLE(V("답변")))),
@@ -1923,9 +1958,11 @@ def main_script():
                  PRINT(V("답변"), "봇"),
                  LOG("봇", V("답변")),
                  IF(eq(V("기록표연결"), 1), TABLE_SYNC()),
-                 SAVELOG(),
-                 IF(eq(V("기억변경"), 1), SAVEMEM(), setv("기억변경", 0)),
-                 STATUS(join("● ", V("호칭"), "님과 대화 중")))),
+                 # 저장은 /save 라고 했을 때만 한다 (그 전까지는 이번 실행에서만 남는다)
+                 IF(eq(V("로그인"), 1), setv("저장할것", 1)),
+                 IF(eq(V("저장요청"), 1), SAVELOG(), SAVEMEM(), setv("저장요청", 0), setv("저장할것", 0)),
+                 IFELSE(eq(V("저장할것"), 1), [STATUS(join("● ", V("호칭"), "님 · 저장 안 됨"))],
+                        [STATUS(join("● ", V("호칭"), "님과 대화 중"))]))),
         STATUS("● 대화 종료"),
     )
 
