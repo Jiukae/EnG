@@ -140,7 +140,8 @@ def chain_words():
     """끝말잇기 낱말: 흔한 명사 + 주제·단어 뜻의 한글 낱말 (2~6글자), 자바스크립트 글자 순서로 정렬."""
     words = set(w for w in D.WORDCHAIN_NOUNS if len(w) >= 2)
     words |= {r[0] for t in (T_TOPIC, T_DEF) for r in KNOW[t][1]
-              if re.fullmatch(r"[가-힣]{2,6}", r[0]) and r[-1] != "신조어"}  # ('킹받' 같은 신조어 조각은 빼고)
+              # ('킹받' 같은 신조어 조각과 '강감찬' 같은 사람 이름은 빼고)
+              if re.fullmatch(r"[가-힣]{2,6}", r[0]) and r[-1] not in ("신조어", "인물", "역사")}
     # 반말로 바꿀 때 망가지는 낱말은 빼 둔다 ('담요!' → '담!')
     words = {w for w in words if banmal_static(f" {w}! ") == f" {w}! " and banmal_static(f" {w}. ") == f" {w}. "}
     words = sorted(words, key=lambda w: w.encode("utf-16-be"))
@@ -347,10 +348,10 @@ JOSA.define(
     ret=V("조사결과"))
 
 STEM.define(
-    # 뒤에 붙은 조사를 뗀다. 아는 주제 낱말(고양이 등)은 그대로 둔다.
+    # 뒤에 붙은 조사를 뗀다. 아는 주제 낱말(고양이 등)과 뜻을 아는 낱말(원숭이, 울릉도 등)은 그대로 둔다.
     setv("어간", STEM.p("낱말")),
     setv("떼기길이", slen(STEM.p("낱말"))),
-    IF(NOT(has(T_TOPIC, STEM.p("낱말"))),
+    IF(NOT(OR(has(T_TOPIC, STEM.p("낱말")), has(T_DEF, lower(STEM.p("낱말"))))),
        setv("떼기완료", 0),
        IF(gt(V("떼기길이"), 3),
           IF(included("조사목록", END(STEM.p("낱말"), 3)),
@@ -361,7 +362,7 @@ STEM.define(
        # 한 글자 조사는 남는 말이 한 글자일 때 아는 주제 낱말인 경우만 뗀다 ('책이' → 책, '오이' → 오이)
        IF(AND(eq(V("떼기완료"), 0), gt(V("떼기길이"), 1)),
           IF(included("조사목록", END(STEM.p("낱말"), 1)),
-             IF(OR(gt(V("떼기길이"), 2), has(T_TOPIC, TAIL(STEM.p("낱말"), 1))),
+             IF(OR(gt(V("떼기길이"), 2), has(T_TOPIC, TAIL(STEM.p("낱말"), 1)), has(T_DEF, TAIL(STEM.p("낱말"), 1))),
                 setv("어간", TAIL(STEM.p("낱말"), 1)))))),
     # '발표했어', '축구하러' 처럼 아는 주제 낱말 뒤에 '하다·이다'가 붙은 말이면 주제 낱말만 남긴다 (긴 꼬리부터)
     *[IF(eq(V("어간"), STEM.p("낱말")), IF(gt(V("떼기길이"), n), IF(included("주제뒤말", END(STEM.p("낱말"), n)),
@@ -815,6 +816,7 @@ HELP = SEP.join([
     "· 문장에서 주제와 감정을 찾아 공감하고 되물어요",
     "· '내 생일은 3월 14일이야', '나 축구 좋아해' 같은 말을 기억해요",
     "· 모르는 건 물어보고, 알려 주면 배워요",
+    "· '장영실'처럼 낱말만 말해도 뜻을 알려 줘요 (1,700여 개)",
     "명령어: 기억 목록 · 나에 대해 알아? · 잊어줘: 내 생일",
     "기록표 · 기록 검색: 고양이 · 기록 통계",
     "놀이: 끝말잇기 · 가위바위보 · 주사위 · 수수께끼 · 퀴즈",
@@ -1008,10 +1010,41 @@ R_MEMORY.define(IF(undone(),
 ))
 
 _talk_guard = lambda: OR(is_q(), lt(slen(m()), 9), AND(empty(V("주제")), eq(V("감정점수"), 0)))
+_tok_i = lambda i: item("원단어들", i)
+_STRONG_DEF_CUES = ["뭐야", "뭐예요", "뭐에요", "뭐지", "뭐냐", "뭔데", "뭔가요", "뭘까", "뭔지", "무엇", "이란", "란뭐", "에대해",
+                    "누구야", "누구예요", "누구에요", "누구지", "누군지", "누구냐", "설명", "뜻"]
 R_TALK.define(IF(undone(),
-    # 단어 뜻 (단어뜻 테이블에서 VLOOKUP)
-    BRANCH(AND(is_q(), eq(V("뜻질문"), 1), gt(slen(V("단어")), 0), has(T_DEF, lower(V("단어")))),
-           setv("템플릿", join("{단어은} ", lookup(T_DEF, lower(V("단어")))))),
+    # 뜻을 아는 낱말 찾기: 질문의 대상 낱말 → 앞의 세 낱말 (조사를 뗀 것, 그대로인 것)
+    setv("뜻낱말", ""),
+    IF(gt(slen(V("단어")), 0), IF(has(T_DEF, lower(V("단어"))), setv("뜻낱말", lower(V("단어"))))),
+    *[IF(AND(empty(V("뜻낱말")), NOT(lt(llen("원단어들"), i))),
+         setv("뜻후보", lower(STEM(_tok_i(i)))),
+         IF(has(T_DEF, V("뜻후보")), setv("뜻낱말", V("뜻후보"))),
+         IF(empty(V("뜻낱말")), IF(has(T_DEF, lower(_tok_i(i))), setv("뜻낱말", lower(_tok_i(i))))))
+      for i in (1, 2, 3)],
+    # 단어 뜻 ("블랙홀이 뭐야?") — '내 친구 알아?' 처럼 내 것을 묻는 말과 긴 문장은 빼고
+    #   ('뭐야·누구야·에 대해' 같은 분명한 말이 있으면 낱말 둘까지, '알아?' 만 있으면 낱말 하나일 때만)
+    BRANCH(AND(is_q(), eq(V("뜻질문"), 1), gt(slen(V("뜻낱말")), 0),
+               OR(lt(V("내용어수"), 2), AND(lt(V("내용어수"), 3), OR(*[contains(m(), c) for c in _STRONG_DEF_CUES]))),
+               NOT(contains(m(), "는지")),
+               NOT(OR(starts(m(), "내"), starts(m(), "우리"), starts(m(), "제"), starts(m(), "나의")))),
+           setv("단어", V("뜻낱말")),
+           setv("템플릿", join("{단어은} ", lookup(T_DEF, V("뜻낱말"))))),
+    # 낱말 하나만 말해도 ('장영실', '블랙홀!') 뜻을 알려 준다. 주제 낱말이면 이어서 묻는다.
+    # (일상 대화 키워드와 똑같은 말 '수수께끼', 신조어 'ㅇㅇ', 기억해 둔 이름 '나비' 는 빼고)
+    # 엔봇이 방금 물어본 것의 대답이면 뜻 대신 대답으로 받는다:
+    #   '왜?' 에는 어떤 낱말이든, '어떤 과목이었어요?' 에는 '수학' 같은 주제 낱말, '기분 어때요?' 에는 '행복' 같은 감정 낱말
+    BRANCH(AND(eq(llen("원단어들"), 1), gt(slen(V("뜻낱말")), 0),
+               NOT(has(T_TALK, V("뜻낱말"))), empty(V("아는이름")), eq(V("신조어말"), 0),
+               NOT(eq(V("지난대기"), "이유")),
+               NOT(AND(eq(V("지난대기"), "이야기"), has(T_TOPIC, V("뜻낱말")))),
+               NOT(AND(eq(V("지난대기"), "기분"), NOT(eq(V("감정점수"), 0))))),
+           setv("단어", V("뜻낱말")),
+           setv("템플릿", join("{단어은} ", lookup(T_DEF, V("뜻낱말")))),
+           # (뜻만 물었는데 '고양이 이름이 뭐예요?' 처럼 내 것을 묻는 질문은 붙이지 않는다)
+           IF(has(T_TOPIC, V("단어")),
+              setv("주제", V("단어")), setv("주제질문", TOPICQ(V("단어"))),
+              IF(NOT(contains(V("주제질문"), "[사실:")), setv("템플릿", join(V("템플릿"), " ", V("주제질문")))))),
     BRANCH(OR(contains(m(), "몇시"), contains(m(), "지금시간"), contains(m(), "현재시간")),
            setv("답변", join("지금은 ", date("HOUR"), "시 ", date("MINUTE"), "분이에요."))),
     BRANCH(OR(contains(m(), "며칠"), contains(m(), "날짜"), contains(m(), "무슨요일"), contains(m(), "몇월")),

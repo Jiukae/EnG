@@ -848,7 +848,7 @@ class WordChainTest(unittest.TestCase):
             last = [t for tag, t, _ in s.transcript_lines() if tag == "봇"][-1]
             if "시작하는 말이 생각 안 나요" in last:  # 엔봇이 졌으면 끝
                 return "그만"
-            word = self.word_for(next_letters(last), used)
+            word = self.word_for(next_letters(last), used | set(s.lst("쓴말")))
             used.add(word)
             return word
         s = play(["끝말잇기"] + [answer] * 6 + ["그만"], seed=4)
@@ -865,7 +865,8 @@ class WordChainTest(unittest.TestCase):
             self.assertIn(bot_word[0], {word[-1], dueum})
             self.assertNotIn(bot_word, mine)
         self.assertIn(r[-1].replace("민수", "{이름}"), D.PHRASES["말-끝말짐"] + ["오늘 이야기 즐거웠어요, {이름}님! 다시 이야기하려면 시작 버튼을 눌러 주세요."])
-        self.assertEqual(str(s.var("대화중")), "1")  # '그만' 은 놀이만 멈춘다
+        if not any("시작하는 말이 생각 안 나요" in reply for reply in r):
+            self.assertEqual(str(s.var("대화중")), "1")  # 놀이 중의 '그만' 은 놀이만 멈춘다
 
     def test_rules(self):
         s = play(["끝말잇기", set_vars("사과", 끝말="전"), "사과", "전기", "가", set_vars("역사", 끝말="력"),
@@ -1069,6 +1070,98 @@ class PastTalkTest(unittest.TestCase):
         s = visit(server, ["수학 진짜 재밌었어"], 1)
         self.assertEqual(s.lst("이야기주제")[:2], ["시험", "수학"])
         self.assertTrue(bot_replies(s)[0].startswith("어제도 수학 이야기를 했었죠! 그때 “재밌어”라고 했어요. "), bot_replies(s)[0])
+
+
+# ------------------------------------------------------------------ 단어 뜻
+def definition_rows():
+    with open(os.path.join(HERE, "knowledge", "표-단어뜻.csv"), encoding="utf-8") as f:
+        return list(csv.reader(f))[1:]
+
+
+class DefinitionTest(unittest.TestCase):
+    def test_many_definitions(self):
+        rows = definition_rows()
+        self.assertGreaterEqual(len(rows), 1700)
+        self.assertEqual(len(rows), len({r[0] for r in rows}))
+        for word, meaning, category in rows:
+            self.assertTrue(meaning.strip() and category.strip(), word)
+            self.assertNotRegex(meaning, r"[\[\]|¤¶]", word)  # 템플릿 기호와 저장 구분 기호는 쓰지 않는다
+
+    def test_every_word_alone_gets_its_meaning(self):
+        """'장영실'처럼 낱말 하나만 말해도 뜻을 알려 준다 (일상 대화 키워드·명령·신조어는 그쪽 대답)."""
+        talk = {k.split("|", 1)[1] for k in list_data("지식키") if k.startswith("말|")}
+        skip = talk | set(list_data("신조어목록")) | {"통계", "구구단", "존댓말", "높임말", "비밀번호"}
+        rows = [r for r in definition_rows() if r[0] not in skip and "{" not in r[1]]
+        self.assertGreater(len(rows), 1650)
+        wrong = []
+        for i in range(0, len(rows), 40):
+            chunk = rows[i:i + 40]
+            # (엔봇이 바로 앞에서 물어본 게 없을 때 — 물어봤으면 낱말 하나도 그 대답으로 받는다)
+            s = play([set_vars(r[0], 대기질문="") for r in chunk], seed=i)
+            for (word, meaning, _), reply in zip(chunk, bot_replies(s)):
+                if not (reply.startswith(word) and meaning in reply):
+                    wrong.append((word, reply))
+        self.assertEqual(wrong, [])
+
+    def test_alone_with_josa_marks_and_banmal(self):
+        r = bot_replies(chat({}, "w1", ["장영실", "블랙홀!", "광합성?", "원숭이", "울릉도", "민주주의"]))
+        self.assertEqual(r[0], "장영실은 조선 세종 때의 과학자예요. 해시계, 물시계, 측우기를 만들었어요.")
+        self.assertTrue(r[1].startswith("블랙홀은 "))
+        self.assertTrue(r[2].startswith("광합성은 "))
+        self.assertTrue(r[3].startswith("원숭이는 손발로"))   # '원숭이' 를 '원숭'+'이' 로 자르지 않는다
+        self.assertTrue(r[4].startswith("울릉도는 동해에"))
+        self.assertTrue(r[5].startswith("민주주의는 "))
+        r = bot_replies(chat({}, "w2", ["반말 써", "개미", "메아리가 뭐야?"]))
+        self.assertTrue(r[1].startswith("개미는 "), r[1])
+        self.assertNotRegex(r[1], HONORIFIC)
+        self.assertEqual(r[2], "메아리는 산이나 벽에 부딪힌 소리가 되돌아와 다시 들리는 거야.")
+
+    def test_topic_word_gets_follow_up_but_not_a_fact_question(self):
+        topics = dict((k.split("|", 1)[1], v) for k, v in zip(list_data("지식키"), list_data("지식값")) if k.startswith("주|"))
+        s = chat({}, "w3", ["학교"])
+        meaning = dict((r[0], r[1]) for r in definition_rows())["학교"]
+        self.assertEqual(bot_replies(s)[0], f"학교는 {meaning} " + topics["학교"].split(" [")[0])
+        # '고양이 이름이 뭐예요? [사실:…]' 처럼 내 것을 묻는 질문은 붙이지 않아서, 다음 말이 이름으로 기억되지 않는다
+        s = chat({}, "w4", ["고양이", "축구"])
+        self.assertNotEqual(s.var("대기질문")[:3], "사실:")
+        self.assertNotIn("내 고양이 이름", memory(s))
+        self.assertTrue(bot_replies(s)[1].startswith("축구는 "))
+
+    def test_one_word_answer_to_a_question_is_an_answer(self):
+        # '어떤 과목 시험이었어요? [이야기]' 에 '수학' → 뜻이 아니라 대답으로 받는다
+        r = bot_replies(chat({}, "w9", ["오늘 시험 망쳤어", "수학"]))
+        self.assertFalse(r[1].startswith("수학은 "), r[1])
+        self.assertIn("수학", r[1])
+        # '왜 그랬어요? [이유]' 에 낱말 하나 → 이유로 받는다
+        r = bot_replies(play([set_vars("숙제", 대기질문="이유")]))
+        self.assertFalse(r[0].startswith("숙제는 "), r[0])
+        # 물어본 게 이야기여도 주제가 아닌 낱말은 뜻을 알려 준다
+        r = bot_replies(play([set_vars("장영실", 대기질문="이야기")]))
+        self.assertTrue(r[0].startswith("장영실은 "), r[0])
+        # '오늘 하루는 어땠어요? [기분]' 에 '행복' → 기분 대답, '장영실' → 뜻
+        r = bot_replies(play([set_vars("행복", 대기질문="기분"), set_vars("장영실", 대기질문="기분")]))
+        self.assertFalse(r[0].startswith("행복은 "), r[0])
+        self.assertTrue(r[1].startswith("장영실은 "), r[1])
+
+    def test_answers_and_memory_come_first(self):
+        # 엔봇이 물어본 것의 대답이면 기억한다
+        s = play([set_vars("고양이", 대기질문="사실:내가 좋아하는 동물")])
+        self.assertEqual(memory(s).get("내가 좋아하는 동물"), "F:고양이")
+        # 기억해 둔 이름 '나비' 는 곤충 나비가 아니라 내 고양이
+        r = bot_replies(chat({}, "w5", ["나 고양이 키워", "나비", "나비"]))
+        self.assertTrue(r[2].startswith("민수님의 고양이 나비 말이죠?"), r[2])
+        # 일상 대화 키워드와 똑같은 말은 그 대답
+        self.assertIn("정답은", bot_replies(chat({}, "w6", ["수수께끼"]))[0])
+
+    def test_questions_about_meaning(self):
+        r = bot_replies(chat({}, "w7", ["이순신 장군이 누구야?", "광합성에 대해 알려줘", "설명문이 뭐야?", "울릉도는 뭐야?"]))
+        self.assertTrue(r[0].startswith("이순신은 "))
+        self.assertTrue(r[1].startswith("광합성은 "))
+        self.assertTrue(r[2].startswith("설명문은 "))
+        self.assertTrue(r[3].startswith("울릉도는 "))
+        # 내 일을 묻는 말에는 사전 뜻을 말하지 않는다
+        for text in ["오늘 학교에서 뭐 배웠는지 알아?", "내 친구 알아?"]:
+            self.assertFalse(bot_replies(chat({}, "w8", [text]))[0].startswith(("학교는", "친구는")), text)
 
 
 class SafetyTest(unittest.TestCase):
