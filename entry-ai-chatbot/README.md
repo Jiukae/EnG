@@ -350,6 +350,7 @@ python3 build_project.py   # project.json, entry-ai-chatbot.ent 만들기
 python3 test_chatbot.py    # 구조 검사 + 대화·저장·기록·안전·화면·반말·놀이·날짜·신조어·지난 이야기·단어 뜻 테스트 (76개)
 python3 preview.py         # preview.png 다시 그리기 (node + playwright 필요)
 python3 thumbnail.py       # 작품 대표 이미지 thumbnail.png (16:9, 1920×1080) 다시 그리기
+python3 test_report.py     # 테스트를 돌리고 결과 그림 test_results/테스트결과.png, 대화결과.png 만들기
 python3 simulate.py 내아이디  # 터미널에서 대화해 보기 (빈 줄 입력 시 끝)
 ```
 
@@ -362,6 +363,7 @@ python3 simulate.py 내아이디  # 터미널에서 대화해 보기 (빈 줄 �
 | `simulate.py` | 엔트리 블록 동작(자바스크립트 형 변환, 함수와 지역 변수, 테이블과 VLOOKUP, 리스트 범위 오류, 글상자 상태)을 옮긴 실행기 |
 | `test_chatbot.py` | 모든 블록(함수 호출·테이블 블록 포함)의 파라미터를 entryjs 정의와 비교하고, 대화·저장·기록표·안전·반말·끝말잇기·가위바위보·날짜·무작위 입력 120회를 검사 |
 | `preview.py` | 시뮬레이터 결과로 무대 미리보기 그림 생성 |
+| `test_report.py` | 테스트를 실제로 돌려 기능별 통과/실패 그림과, 새 기능 대화 그림을 만든다 (`test_results/`) |
 | `thumbnail.py` | 작품 대표 이미지(16:9, 1920×1080) 생성. 제목 두 줄과 로봇 하나만 둔 단순한 디자인 (로봇은 SVG로 그림) |
 
 블록 이름과 파라미터 순서는 [entrylabs/entryjs](https://github.com/entrylabs/entryjs)의
