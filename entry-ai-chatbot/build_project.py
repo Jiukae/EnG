@@ -21,6 +21,7 @@
 사용법:  python3 build_project.py   →  entry-ai-chatbot.ent, project.json 생성
 """
 import csv
+import hashlib
 import io
 import json
 import math
@@ -31,10 +32,10 @@ import time
 
 import data as D
 from dsl import (AND, ASK, BG, BREAK, CAST, ELIF_CHAIN, FG, FUNCS, HIDE, HIDE_ANSWER, IF, IFELSE, LISTS, MSGS,
-                 NOT, OR, REPEAT, SCAN, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNSAY, UNTIL, V, VARS, WAIT,
-                 WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, clear_many, contains, count, date,
-                 empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, mod, nickname, quot,
-                 pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount,
+                 NOT, OR, REPEAT, SCAN, SHAPE, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNSAY, UNTIL, V, VARS, WAIT,
+                 WHEN_CLICK, WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, clear_many,
+                 contains, count, date, empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, mod,
+                 nickname, quot, pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount,
                  translate, username, walk_blocks)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -46,7 +47,10 @@ SEP = "¶"               # 저장 문자열 안에서 줄을 나누는 기호
 CHUNK = 24              # 말풍선 한 줄의 최대 글자 수
 ROWS = 9                # 화면에 보이는 말풍선 줄 수
 SHOW_HISTORY = 8        # 다시 접속했을 때 화면에 보여 줄 지난 대화 줄 수
-MAX_HISTORY_LINES = 40  # 사용자마다 서버에 남기는 대화 줄 수
+MAX_HISTORY_LINES = 30  # 대화 하나마다 서버에 남기는 줄 수
+MAX_CONVS = 5           # 왼쪽 '대화 기록'에 두는 대화 수 (넘으면 가장 오래된 대화를 뺀다)
+CONV_MARK = "#대화"     # 서버에 저장할 때 대화와 대화 사이에 넣는 줄
+TITLE_LEN = 9           # 대화 칸에 보이는 제목 글자 수 (넘으면 …)
 MAX_LINE_LEN = 140      # 서버에 남기는 한 줄의 최대 길이 (날짜·시각·주제·감정 포함)
 MAX_MEMORIES = 50       # 사용자마다 기억하는 것의 수
 MAX_RECORDS = 200       # 기록 리스트(와 대화기록표)에 남기는 줄 수
@@ -67,6 +71,12 @@ NOTICE_FG = "#94A3B8"
 THINK_FG = "#6366F1"
 ROW_TOP, ROW_STEP, ROW_H = 98, 17, 17
 LEFT_X, RIGHT_X = -228, 228
+CHAT_LEFT, CHAT_CENTER, CHAT_W = -122, 56, 368   # 대화창 (왼쪽 대화 기록 옆)
+# 왼쪽 '대화 기록' (사이드바). 무대 아래쪽은 엔트리 입력창이 덮으므로 y=-66 위까지만 쓴다
+SIDE_X, SIDE_W, SIDE_TOP, SIDE_BOTTOM = -184, 112, 107, -66
+SLOT_X, SLOT_W, SLOT_H, SLOT_TOP, SLOT_STEP, ICON_X = -190, 88, 24, 68, 28, -137
+SIDE_BG, SLOT_BG, SLOT_FG, SLOT_SEL_BG = "#1E1B4B", "#2A2766", "#C7D2FE", "#4F46E5"
+ASSET_DIR = os.path.join(HERE, "assets")
 
 
 def read_csv(name):
@@ -207,6 +217,14 @@ CLEARLOG = Func("기록 비우기")
 DIARY_FIND = Func("지난 이야기 찾기", ["주제"])
 DIARY_GET = Func("지난 이야기 꺼내기", ["번호"])
 DIARY_PUT = Func("지난 이야기 적기", ["주제", "점수", "요약"])
+# 왼쪽 '대화 기록': 대화마다 기록(대화-내용)과 마지막으로 저장한 기록(대화-저장본)을 리스트에 둔다
+CONV_TITLE = Func("대화 제목", ["글"], value=True)
+CONV_DATE = Func("대화 날짜", ["글"], value=True)
+CONV_OPEN = Func("대화 펼치기", ["번호"])
+CONV_NEW = Func("새 대화 만들기")
+CONV_SAVE = Func("대화 저장하기", ["번호"])
+DRAW_SIDE = Func("대화 목록 그리기")
+STATUS_UPDATE = Func("저장 상태 표시")
 
 # ================================================================ 지식 찾기 · 대화기록표
 KNOWLEDGE = Func("지식 찾기", ["종류", "낱말"], value=True)
@@ -824,8 +842,9 @@ HELP = SEP.join([
     "지난번에 무슨 얘기 했지? · 야르 · ㅎㅇ · 킹받다가 뭐야?",
     "번역: 문장 · 한국어로: sentence · 계산: 12*3",
     "몇 시야? · 종료",
-    "/new 새 대화 · /clear 기록 지우기 · /clear all 모두 지우기",
-    "/save 저장 (저장해야 다음에 들어와도 이어져요)",
+    "왼쪽 '＋ 새 대화' 나 /new 새 대화 · 대화 칸을 누르면 그 대화로",
+    "왼쪽 💾 를 누르면 그 대화를 저장해요 (/save 도 돼요)",
+    "/clear 기록 지우기 · /clear all 모두 지우기",
 ])
 TEACH_FORMAT = "이렇게 입력해 주세요 → 기억해: 질문 = 답 (예: 기억해: 내 별명 = 꼬마)"
 m = lambda: V("정리메시지")
@@ -868,7 +887,7 @@ R_CMD.define(
                            setv("답변", join("알겠어요! 앞으로 '", V("키"), "'(이)라고 물으면 '", V("저장값"), "'(이)라고 답할게요.")),
                            IFELSE(eq(V("저장가능"), 0),
                                   [setv("답변", join(V("답변"), " (저장되지 않는 상태라 이번 실행에서만 기억해요.)"))],
-                                  [setv("답변", join(V("답변"), " (/save 하면 다음에도 기억해요.)"))])])])],
+                                  [setv("답변", join(V("답변"), " (왼쪽 💾 를 누르면 다음에도 기억해요.)"))])])])],
                   [setv("답변", TEACH_FORMAT)])),
     BRANCH(cmd("잊어줘", "잊어", "삭제"),
            IFELSE(empty(V("내용")),
@@ -926,25 +945,26 @@ R_CMD.define(
            IFELSE(eq(V("요약수"), 0),
                   [setv("답변", "아직 기억하고 있는 게 없어요. 이야기를 들려주면 하나씩 기억할게요!")],
                   [setv("답변", join("기억하고 있는 것 ", V("요약수"), "개예요.", V("답변")))])),
-    # /new: 화면과 대화 흐름(놀이, 물어본 것, 이번에 나온 주제)만 새로 — 기록과 기억은 그대로
+    # /new: 왼쪽 '대화 기록'에 새 대화를 만든다 (기억은 그대로). '/new' 와 그 대답은 새 대화에 남기지 않는다
     BRANCH(OR(eq(m(), "/new"), eq(m(), "/새대화"), eq(m(), "새대화"), eq(m(), "새로시작")),
-           clear("화면글"), clear("화면종류"), PRINT("── 새 대화 ──", "알림"),
-           setv("끝말", ""), clear("쓴말"), setv("가위내점수", 0), setv("가위봇점수", 0), clear("이번주제들"),
+           CONV_NEW(), setv("기록건너뛰기", 1),
+           IF(eq(V("새대화결과"), "넘침"), PRINT("가장 오래된 대화는 목록에서 뺐어요.", "알림")),
            setv("템플릿", "새 대화를 시작해요! 오늘은 무슨 이야기를 해 볼까요? [이야기]")),
     # /clear all: 기록에 기억과 지난 이야기까지 모두 / /clear: 대화 기록만
     BRANCH(OR(eq(m(), "/clearall"), eq(m(), "/모두지우기"), eq(m(), "모두지우기"), eq(m(), "전부지우기"), eq(m(), "초기화")),
-           setv("기록블롭", ""), clear("화면글"), clear("화면종류"), CLEARLOG(),
-           clear_many(["내질문", "내답변", "이야기주제", "이야기값", "이번주제들"]),
+           setv("기록블롭", ""), clear_many(["화면글", "화면종류"]), CLEARLOG(),
+           clear_many(["내질문", "내답변", "이야기주제", "이야기값", "이번주제들", "대화-내용", "대화-저장본"]),
+           append("대화-내용", ""), append("대화-저장본", ""), setv("현재대화", 1),
            setv("최근주제", ""), setv("지난기분", ""), setv("말투", "존댓말"),
            IFELSE(eq(V("로그인"), 1),
                   [setv("호칭", V("닉네임")), IF(eq(slen(repl(V("호칭"), " ", "")), 0), setv("호칭", V("아이디")))],
                   [setv("호칭", "방문자")]),
            setv("답변", "대화 기록과 기억을 모두 지웠어요. 처음 만난 것처럼 새로 시작해요! "
-                      "(저장된 것까지 지우려면 /save 해 주세요.)")),
+                      "(저장된 것까지 지우려면 💾 를 눌러 주세요.)")),
     BRANCH(OR(eq(m(), "/clear"), eq(m(), "/지우기"), eq(m(), "기록지우기"), eq(m(), "기록삭제")),
-           setv("기록블롭", ""), clear("화면글"), clear("화면종류"), CLEARLOG(),
-           setv("답변", "대화 기록을 지웠어요. 기억하고 있는 건 그대로예요. "
-                      "(저장된 기록까지 지우려면 /save, 기억까지 지우려면 /clear all)")),
+           setv("기록블롭", ""), clear_many(["화면글", "화면종류"]), CLEARLOG(), setitem("대화-내용", V("현재대화"), ""),
+           setv("답변", "이 대화의 기록을 지웠어요. 기억하고 있는 건 그대로예요. "
+                      "(저장된 기록까지 지우려면 💾, 기억까지 지우려면 /clear all)")),
     # /save: 지금까지의 대화와 기억을 서버(실시간 리스트)에 저장한다 (실제 저장은 이 말까지 기록한 뒤에)
     BRANCH(OR(eq(m(), "/save"), eq(m(), "/저장"), eq(m(), "저장"), eq(m(), "저장해"), eq(m(), "저장해줘")),
            ELIF_CHAIN(
@@ -954,9 +974,10 @@ R_CMD.define(
                otherwise=[setv("저장요청", 1),
                           setv("답변", "저장했어요! 💾 다음에 들어와도 지금까지의 대화와 기억이 이어져요.")])),
     # 저장하지 않은 대화가 있으면 끝내기 전에 한 번 묻는다
-    BRANCH(AND(_is_end(), eq(V("로그인"), 1), eq(V("저장가능"), 1), eq(V("저장할것"), 1), eq(V("지난종료물음"), 0)),
+    BRANCH(AND(_is_end(), eq(V("로그인"), 1), eq(V("저장가능"), 1), gt(V("안저장수"), 0), eq(V("지난종료물음"), 0)),
            setv("종료물음", 1),
-           setv("답변", "아직 저장하지 않은 대화가 있어요. 저장하려면 /save, 저장하지 않고 끝내려면 한 번 더 '종료'라고 해 주세요.")),
+           setv("답변", join("아직 저장하지 않은 대화가 ", V("안저장수"), "개 있어요. 저장하려면 왼쪽 💾 를 누르거나 /save, "
+                             "저장하지 않고 끝내려면 한 번 더 '종료'라고 해 주세요."))),
     BRANCH(_is_end(),
            setv("대화중", 0),
            setv("템플릿", "오늘 이야기 즐거웠어요, {이름}님! 다시 이야기하려면 시작 버튼을 눌러 주세요.")),
@@ -1653,7 +1674,7 @@ R_PAST.define(
 REPLY.define(
     setv("답변", ""), setv("템플릿", ""), setv("처리됨", 0), setv("이번대기", ""), setv("새기분", ""), setv("기록가림", 0),
     setv("말투제외", 0), setv("말투변경", 0), setv("인용글", ""),
-    setv("지난종료물음", V("종료물음")), setv("종료물음", 0),
+    setv("지난종료물음", V("종료물음")), setv("종료물음", 0), setv("기록건너뛰기", 0),
     setv("지난대기", V("대기질문")), setv("대기질문", ""),
     clear("후보답변"),
     ANALYZE(),
@@ -1819,7 +1840,15 @@ def _load_blob(lst, pos_var, blob_var):
 
 SLOT_LOG.define(*_find_slot("대화기록", "기록위치"))
 SLOT_MEM.define(*_find_slot("기억저장소", "기억위치"))
-SAVELOG.define(_save_slot("대화기록", "기록위치", SLOT_LOG, "기록블롭"))
+SAVELOG.define(
+    # 저장한 대화들을 '#대화' 줄로 이어 붙여 내 칸 하나에 넣는다 (저장한 적 없는 대화는 빼고)
+    setv("서버블롭", ""), setv("묶음k", 1),
+    REPEAT(llen("대화-저장본"),
+           IF(gt(slen(item("대화-저장본", V("묶음k"))), 0),
+              setv("서버블롭", join(V("서버블롭"), CONV_MARK, SEP, item("대화-저장본", V("묶음k"))))),
+           chg("묶음k", 1)),
+    _save_slot("대화기록", "기록위치", SLOT_LOG, "서버블롭"),
+)
 SAVEMEM.define(
     setv("기억블롭", ""), setv("묶음k", 1),
     REPEAT(llen("내질문"),
@@ -1836,7 +1865,7 @@ LOAD.define(
     *_ensure_slot("대화기록", "기록위치", SLOT_LOG),
     *_ensure_slot("기억저장소", "기억위치", SLOT_MEM),
     IF(OR(eq(V("기록위치"), 0), eq(V("기억위치"), 0)), setv("저장가능", 0)),
-    *_load_blob("대화기록", "기록위치", "기록블롭"),
+    *_load_blob("대화기록", "기록위치", "서버블롭"),
     *_load_blob("기억저장소", "기억위치", "기억블롭"),
     # 기억블롭 "키=값¶키=값¶" → 내질문 / 내답변 리스트
     setv("남은문자열", V("기억블롭")),
@@ -1859,27 +1888,122 @@ LOAD.define(
                    (eq(item("내질문", V("불러k")), "내 이름"),
                     [IF(starts(item("내답변", V("불러k")), "F:"), setv("호칭", HEAD(item("내답변", V("불러k")), 2)))]))],
           3, k="불러k"),
-    # 지난 대화 → 기록 리스트에 펼치고, 마지막 몇 줄은 말풍선으로 보여 준다
+    # 저장된 대화들 → 대화-내용 / 대화-저장본 ('#대화' 줄로 나뉜다. '#대화' 가 없는 예전 기록은 대화 하나)
+    clear_many(["대화-내용", "대화-저장본"]),
+    setv("남은문자열", V("서버블롭")),
+    UNTIL(empty(V("남은문자열")), *[IF(NOT(empty(V("남은문자열"))),
+        *SPLIT_LINE("남은문자열", "줄", "위치"),
+        IFELSE(eq(V("줄"), CONV_MARK),
+               [append("대화-내용", ""), append("대화-저장본", "")],
+               [IF(gt(slen(V("줄")), 0),
+                   IF(eq(llen("대화-내용"), 0), append("대화-내용", ""), append("대화-저장본", "")),
+                   setitem("대화-내용", llen("대화-내용"),
+                           join(item("대화-내용", llen("대화-내용")), V("줄"), SEP)))])) for _ in range(4)]),
+    # 불러온 그대로가 마지막 저장본이다
+    setv("묶음k", 1),
+    REPEAT(llen("대화-내용"), setitem("대화-저장본", V("묶음k"), item("대화-내용", V("묶음k"))), chg("묶음k", 1)),
+    IF(eq(llen("대화-내용"), 0), append("대화-내용", ""), append("대화-저장본", "")),
+    CONV_OPEN(llen("대화-내용")),
+)
+
+
+# ================================================================ 왼쪽 '대화 기록'
+CONV_TITLE.define(
+    # 대화에서 내가 처음 한 말이 제목 ('나|날짜|시각|주제|감정|내용' 줄의 내용)
+    setv("제목글", join(SEP, CONV_TITLE.p("글"))),
+    setv("제목위치", find(V("제목글"), join(SEP, "나|"))),
+    IFELSE(gt(V("제목위치"), 0),
+           [setv("제목줄", HEAD(V("제목글"), V("제목위치"))),
+            IF(gt(find(V("제목줄"), SEP), 0), setv("제목줄", sub(V("제목줄"), 1, minus(find(V("제목줄"), SEP), 1)))),
+            *[setv("제목줄", HEAD(V("제목줄"), find(V("제목줄"), "|"))) for _ in range(5)],
+            IF(gt(slen(V("제목줄")), TITLE_LEN), setv("제목줄", join(sub(V("제목줄"), 1, TITLE_LEN - 1), "…")))],
+           [IFELSE(gt(slen(CONV_TITLE.p("글")), 0), [setv("제목줄", "지난 대화")], [setv("제목줄", "새 대화")])]),
+    ret=V("제목줄"))
+CONV_DATE.define(
+    # 첫 줄의 날짜 ('나|2026-10-26|…' → 10/26). 아직 아무 말도 없으면 오늘
+    setv("날짜글", join(date("MONTH"), "/", date("DAY"))),
+    IF(gt(slen(CONV_DATE.p("글")), 12), IF(eq(charat(CONV_DATE.p("글"), 2), "|"),
+       IF(eq(charat(CONV_DATE.p("글"), 7), "-"),
+          setv("날짜글", join(minus(sub(CONV_DATE.p("글"), 8, 9), 0), "/", minus(sub(CONV_DATE.p("글"), 11, 12), 0)))))),
+    ret=V("날짜글"))
+DRAW_SIDE.define(
+    # 칸 k 에는 k 번째로 최근 대화. 글·지금 보는 대화인지·저장됐는지를 정해 두고 칸들이 스스로 그린다
+    *[x for k in range(1, MAX_CONVS + 1) for x in [
+        setv("칸대화", minus(plus(llen("대화-내용"), 1), k)),
+        IFELSE(gt(V("칸대화"), 0),
+               [setv(f"칸보임{k}", 1),
+                setv(f"칸글{k}", join(" ", CONV_TITLE(item("대화-내용", V("칸대화"))), "\n ",
+                                     CONV_DATE(item("대화-내용", V("칸대화"))))),
+                IFELSE(eq(V("칸대화"), V("현재대화")), [setv(f"칸현재{k}", 1)], [setv(f"칸현재{k}", 0)]),
+                IFELSE(AND(gt(slen(item("대화-저장본", V("칸대화"))), 0),
+                           eq(item("대화-저장본", V("칸대화")), item("대화-내용", V("칸대화")))),
+                       [setv(f"칸저장{k}", 1)], [setv(f"칸저장{k}", 0)])],
+               [setv(f"칸보임{k}", 0)])]],
+    CAST("목록 그리기"),
+)
+_unsaved = lambda c: AND(gt(slen(item("대화-내용", c)), 0), NOT(eq(item("대화-내용", c), item("대화-저장본", c))))
+STATUS_UPDATE.define(
+    # 저장하지 않은 대화 수 (끝낼 때 묻는 데 쓴다), 지금 대화가 저장 안 됐으면 위쪽에 표시
+    setv("안저장수", 0),
+    *[IF(NOT(gt(c, llen("대화-내용"))), IF(_unsaved(c), chg("안저장수", 1))) for c in range(1, MAX_CONVS + 1)],
+    IFELSE(AND(eq(V("로그인"), 1), _unsaved(V("현재대화"))),
+           [STATUS(join("● ", V("호칭"), "님 · 저장 안 됨"))],
+           [STATUS(join("● ", V("호칭"), "님과 대화 중"))]),
+)
+CONV_OPEN.define(
+    # 번호째 대화를 연다: 기록 리스트를 그 대화로 채우고, 마지막 몇 줄을 말풍선으로 보여 준다
+    setv("현재대화", CONV_OPEN.p("번호")),
+    setv("기록블롭", item("대화-내용", V("현재대화"))),
+    clear_many(["화면글", "화면종류"]),
+    CLEARLOG(),
+    # 대화 흐름(물어본 것, 놀이, 이번에 나온 주제)도 새로
+    setv("대기질문", ""), setv("지난답변", ""), setv("보인답변", ""), setv("끝말", ""), clear("쓴말"),
+    setv("가위내점수", 0), setv("가위봇점수", 0), clear("이번주제들"),
     setv("전체줄수", count(V("기록블롭"), SEP)),
     IF(gt(V("전체줄수"), 0), PRINT("── 지난 대화 ──", "알림")),
     setv("남은문자열", V("기록블롭")),
-    LOAD.set("줄번호", 0),
+    setv("펼친줄", 0),
     UNTIL(empty(V("남은문자열")),
           *SPLIT_LINE("남은문자열", "줄", "위치"),
-          LOAD.inc("줄번호"),
+          chg("펼친줄", 1),
           IF(gt(slen(V("줄")), 0),
              PARSELINE(V("줄")),
              LOGROW(V("줄날짜"), V("줄시각"), V("줄누가"), V("줄주제"), V("줄감정"), V("줄내용")),
-             IF(gt(LOAD.get("줄번호"), minus(V("전체줄수"), SHOW_HISTORY)), PRINT(V("줄내용"), V("줄누가"))))),
+             IF(gt(V("펼친줄"), minus(V("전체줄수"), SHOW_HISTORY)), PRINT(V("줄내용"), V("줄누가"))))),
     IF(gt(V("전체줄수"), 0), PRINT("── 이어서 이야기해요 ──", "알림")),
+    CAST("화면 그리기"),
+    DRAW_SIDE(),
 )
+CONV_NEW.define(
+    # 가장 최근 대화가 아직 비어 있으면 그 대화를 쓰고, 아니면 새로 만든다 (MAX_CONVS 개가 넘으면 가장 오래된 대화를 뺀다)
+    setv("새대화결과", "새로"),
+    setitem("대화-내용", V("현재대화"), V("기록블롭")),
+    IFELSE(empty(item("대화-내용", llen("대화-내용"))),
+           [setv("새대화결과", "그대로")],
+           [IF(NOT(lt(llen("대화-내용"), MAX_CONVS)),
+               remove("대화-내용", 1), remove("대화-저장본", 1), setv("새대화결과", "넘침")),
+            append("대화-내용", ""), append("대화-저장본", "")]),
+    CONV_OPEN(llen("대화-내용")),
+    PRINT("── 새 대화 ──", "알림"),
+)
+CONV_SAVE.define(
+    # 번호째 대화를 저장본으로 삼고, 저장한 대화 전부와 기억을 서버에 쓴다
+    setitem("대화-내용", V("현재대화"), V("기록블롭")),
+    setitem("대화-저장본", CONV_SAVE.p("번호"), item("대화-내용", CONV_SAVE.p("번호"))),
+    SAVELOG(), SAVEMEM(),
+    DRAW_SIDE(), STATUS_UPDATE(),
+)
+
 
 
 # ================================================================ 메인
 def main_script():
     clean_input = repl(repl(repl(repl(repl(repl(repl(answer(), SEP, " "), "[", "("), "]", ")"), "{", "("), "}", ")"), "|", "/"),
                        "¤", " ")
-    return WHEN_START(
+    # 표지의 '시작하기' 를 누르면 시작한다
+    return WHEN_MSG(
+        "챗봇 시작",
+        setv("챗봇준비", 0), setv("처리중", 1),
         setv("글자-받침없음", D.NO_BATCHIM), setv("글자-ㄹ받침", D.RIEUL), setv("글자-ㅆ받침", D.SSANG_SIOT),
         HIDE_ANSWER(),
         clear("화면글"), clear("화면종류"), clear("후보답변"), clear("내질문"), clear("내답변"),
@@ -1891,14 +2015,15 @@ def main_script():
         STATUS("● 연결 중…"),
         setv("아이디", username()),
         setv("닉네임", nickname()),
-        setv("기록블롭", ""), setv("기억블롭", ""), setv("기록위치", 0), setv("기억위치", 0),
+        setv("기록블롭", ""), setv("서버블롭", ""), setv("기억블롭", ""), setv("기록위치", 0), setv("기억위치", 0),
         setv("대기질문", ""), setv("최근주제", ""), setv("지난기분", ""), setv("직전기분", ""),
-        setv("저장할것", 0), setv("저장요청", 0), setv("종료물음", 0),
+        setv("저장요청", 0), setv("종료물음", 0), setv("기록건너뛰기", 0), setv("현재대화", 1),
         setv("지난답변", ""), setv("주제", ""), setv("단어", ""), setv("키표시", ""), setv("값", ""), setv("감정점수", 0),
         setv("말투", "존댓말"), setv("말투제외", 0), setv("끝말", ""), clear("쓴말"),
         setv("인용글", ""), clear("이야기주제"), clear("이야기값"), clear("이번주제들"),
         IFELSE(eq(slen(repl(V("아이디"), " ", "")), 0),
-               [setv("로그인", 0), setv("저장가능", 0), setv("호칭", "방문자"), setv("템플릿", pick("말-환영손님"))],
+               [setv("로그인", 0), setv("저장가능", 0), setv("호칭", "방문자"), setv("템플릿", pick("말-환영손님")),
+                clear_many(["대화-내용", "대화-저장본"]), append("대화-내용", ""), append("대화-저장본", ""), CONV_OPEN(1)],
                [setv("로그인", 1), setv("저장가능", 1),
                 setv("호칭", V("닉네임")),
                 IF(eq(slen(repl(V("호칭"), " ", "")), 0), setv("호칭", V("아이디"))),
@@ -1924,7 +2049,7 @@ def main_script():
                     otherwise=[setv("템플릿", pick("말-환영"))]),
                 IFELSE(eq(V("저장가능"), 0),
                        [PRINT("저장 서버에 연결하지 못해서 이번 대화는 저장되지 않아요.", "알림")],
-                       [PRINT("💾 저장은 /save · 새 대화 /new", "알림")])]),
+                       [PRINT("💾 왼쪽 대화 칸 옆 아이콘을 누르면 저장돼요", "알림")])]),
         setv("이번대기", ""),
         setv("답변", FILL(V("템플릿"))),
         IF(eq(V("말투"), "반말"), setv("답변", STYLE(V("답변")))),
@@ -1932,14 +2057,17 @@ def main_script():
         setv("대기질문", V("이번대기")),
         PRINT(V("답변"), "봇"),
         setv("보인답변", V("답변")),
-        STATUS(join("● ", V("호칭"), "님과 대화 중")),
-        setv("대화중", 1),
+        DRAW_SIDE(), STATUS_UPDATE(),
+        setv("대화중", 1), setv("처리중", 0), setv("챗봇준비", 1),
         UNTIL(eq(V("대화중"), 0),
               CAST("말풍선 지우기"),
               ASK("메시지를 입력하세요"),
               # 저장 형식과 템플릿 기호를 깨뜨리는 글자는 바꿔 둔다
               setv("메시지", TRIM(clean_input)),
+              # 왼쪽 칸을 누른 일을 처리하는 중이면 끝날 때까지 기다린다
+              UNTIL(eq(V("처리중"), 0)),
               IF(gt(slen(V("메시지")), 0),
+                 setv("처리중", 1),
                  PRINT(V("메시지"), "나"),
                  STATUS("● 생각하는 중…"),
                  append("화면글", "엔봇이 생각하는 중…"), append("화면종류", "생각"),
@@ -1953,18 +2081,55 @@ def main_script():
                  IF(AND(eq(V("말투"), "반말"), eq(V("말투제외"), 0)), setv("답변", STYLE(V("답변")))),
                  IF(gt(slen(V("인용글")), 0), setv("답변", repl(V("답변"), "¤", V("인용글")))),
                  setv("보인답변", V("답변")),
-                 # 개인정보가 담긴 말은 서버 기록과 기록표에 남기지 않는다
-                 IFELSE(eq(V("기록가림"), 1), [LOG("나", "🔒 (개인정보라서 기록하지 않았어요)")], [LOG("나", V("메시지"))]),
+                 # 개인정보가 담긴 말은 서버 기록과 기록표에 남기지 않는다 ('/new' 는 새 대화에 남기지 않는다)
+                 IF(eq(V("기록건너뛰기"), 0),
+                    IFELSE(eq(V("기록가림"), 1), [LOG("나", "🔒 (개인정보라서 기록하지 않았어요)")], [LOG("나", V("메시지"))])),
                  PRINT(V("답변"), "봇"),
-                 LOG("봇", V("답변")),
+                 IF(eq(V("기록건너뛰기"), 0), LOG("봇", V("답변"))),
                  IF(eq(V("기록표연결"), 1), TABLE_SYNC()),
-                 # 저장은 /save 라고 했을 때만 한다 (그 전까지는 이번 실행에서만 남는다)
-                 IF(eq(V("로그인"), 1), setv("저장할것", 1)),
-                 IF(eq(V("저장요청"), 1), SAVELOG(), SAVEMEM(), setv("저장요청", 0), setv("저장할것", 0)),
-                 IFELSE(eq(V("저장할것"), 1), [STATUS(join("● ", V("호칭"), "님 · 저장 안 됨"))],
-                        [STATUS(join("● ", V("호칭"), "님과 대화 중"))]))),
+                 setitem("대화-내용", V("현재대화"), V("기록블롭")),
+                 # 저장은 💾 를 누르거나 /save 라고 했을 때만 한다 (그 전까지는 이번 실행에서만 남는다)
+                 IF(eq(V("저장요청"), 1), setv("저장요청", 0), CONV_SAVE(V("현재대화"))),
+                 DRAW_SIDE(), STATUS_UPDATE(),
+                 setv("처리중", 0))),
+        setv("챗봇준비", 0),
         STATUS("● 대화 종료"),
     )
+
+
+def side_handlers():
+    """왼쪽 '대화 기록'을 누르면 (엔봇 오브젝트가) 하는 일. 대답을 만드는 중이면 끝날 때까지 기다린다."""
+    picked = lambda: minus(plus(llen("대화-내용"), 1), V("누른칸"))   # 칸 k = k 번째로 최근 대화
+    begin = lambda: [UNTIL(eq(V("처리중"), 0)), setv("처리중", 1), setv("고른대화", picked())]
+    return [
+        WHEN_MSG("대화 칸 누름", IF(eq(V("챗봇준비"), 1),
+            *begin(),
+            IF(AND(gt(V("고른대화"), 0), NOT(eq(V("고른대화"), V("현재대화")))),
+               setitem("대화-내용", V("현재대화"), V("기록블롭")),
+               CONV_OPEN(V("고른대화")), STATUS_UPDATE()),
+            setv("처리중", 0))),
+        WHEN_MSG("저장 아이콘 누름", IF(eq(V("챗봇준비"), 1),
+            *begin(),
+            IF(gt(V("고른대화"), 0), ELIF_CHAIN(
+                (eq(V("로그인"), 0), [PRINT("💾 저장은 로그인했을 때만 할 수 있어요.", "알림")]),
+                (eq(V("저장가능"), 0), [PRINT("💾 저장 서버에 연결하지 못해서 저장할 수 없어요.", "알림")]),
+                (empty(item("대화-내용", V("고른대화"))), [PRINT("💾 아직 저장할 이야기가 없어요.", "알림")]),
+                otherwise=[CONV_SAVE(V("고른대화")),
+                           PRINT(join("💾 '", CONV_TITLE(item("대화-내용", V("고른대화"))), "' 대화를 저장했어요."),
+                                 "알림")])),
+            setv("처리중", 0))),
+        WHEN_MSG("새 대화 버튼 누름", IF(eq(V("챗봇준비"), 1),
+            UNTIL(eq(V("처리중"), 0)), setv("처리중", 1),
+            CONV_NEW(),
+            IF(eq(V("새대화결과"), "넘침"), PRINT("가장 오래된 대화는 목록에서 뺐어요.", "알림")),
+            setv("이번대기", ""),
+            setv("답변", FILL("새 대화를 시작해요! 오늘은 무슨 이야기를 해 볼까요? [이야기]")),
+            IF(eq(V("말투"), "반말"), setv("답변", STYLE(V("답변")))),
+            setv("대기질문", V("이번대기")),
+            PRINT(V("답변"), "봇"), setv("보인답변", V("답변")),
+            DRAW_SIDE(), STATUS_UPDATE(),
+            setv("처리중", 0))),
+    ]
 
 
 # ================================================================ 프로젝트 조립
@@ -2023,28 +2188,97 @@ def text_box(name, text, x, y, size, colour, bg="transparent", align=0, bold=Fal
     }
 
 
+ASSETS = {}  # 파일 id → (그림, 작은 그림) — .ent 에 함께 넣는다
+
+
+def png_size(path):
+    with open(path, "rb") as f:
+        head = f.read(24)
+    return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+
+
+def picture(name):
+    """assets/<name>.png 를 엔트리 '모양'으로. 파일 id 는 그림 내용으로 정해서 빌드할 때마다 같게 한다.
+    파일 위치는 엔트리 오프라인이 .ent 를 저장하는 방식 (temp/ab/cd/image/<id>.png) 을 따른다."""
+    path = os.path.join(ASSET_DIR, f"{name}.png")
+    with open(path, "rb") as f:
+        file_id = hashlib.md5(f.read()).hexdigest()
+    w, h = png_size(path)
+    sub = f"temp/{file_id[:2]}/{file_id[2:4]}"
+    ASSETS[file_id] = (path, os.path.join(ASSET_DIR, "썸네일", f"{name}.png"))
+    return {"id": gen_id(), "name": name, "filename": file_id, "fileurl": f"{sub}/image/{file_id}.png",
+            "thumbUrl": f"{sub}/thumb/{file_id}.png", "imageType": "png", "dimension": {"width": w, "height": h}}
+
+
+def sprite(name, pictures, x, y, scale, script=(), visible=True, scene_id=None):
+    w, h = pictures[0]["dimension"]["width"], pictures[0]["dimension"]["height"]
+    return {
+        "id": gen_id(), "name": name, "objectType": "sprite", "rotateMethod": "free", "scene": scene_id,
+        "lock": True, "script": json.dumps(place(list(script)), ensure_ascii=False),
+        "sprite": {"pictures": pictures, "sounds": []}, "selectedPictureId": pictures[0]["id"],
+        "entity": {"x": x, "y": y, "regX": w / 2, "regY": h / 2, "scaleX": scale, "scaleY": scale, "rotation": 0,
+                   "direction": 90, "width": w, "height": h, "font": "undefined undefined", "visible": visible},
+    }
+
+
+def side_objects(scene_id):
+    """왼쪽 '대화 기록': 새 대화 버튼, 대화 칸 5개, 칸마다 💾 저장 아이콘 (그림은 assets.py 로 직접 그렸다)."""
+    icons, slots = [], []
+    for k in range(1, MAX_CONVS + 1):
+        y = SLOT_TOP - (k - 1) * SLOT_STEP
+        unsaved, saved = picture("저장하기"), picture("저장됨")
+        icons.append(sprite(f"저장{k}", [unsaved, saved], ICON_X, y, 0.25, visible=False, scene_id=scene_id, script=[
+            WHEN_CLICK(setv("누른칸", k), CAST("저장 아이콘 누름")),
+            WHEN_MSG("목록 그리기",
+                     IFELSE(eq(V(f"칸저장{k}"), 1), [SHAPE(saved["id"])], [SHAPE(unsaved["id"])]),
+                     IFELSE(eq(V(f"칸보임{k}"), 1), [SHOW()], [HIDE()]))]))
+        slots.append(text_box(f"대화칸{k}", " ", SLOT_X, y, 8, SLOT_FG, bg=SLOT_BG, align=1, width=SLOT_W,
+                              height=SLOT_H, line_break=True, visible=False, scene_id=scene_id, script=[
+            WHEN_CLICK(setv("누른칸", k), CAST("대화 칸 누름")),
+            WHEN_MSG("목록 그리기",
+                     IFELSE(eq(V(f"칸보임{k}"), 1),
+                            [WRITE(V(f"칸글{k}")),
+                             IFELSE(eq(V(f"칸현재{k}"), 1), [BG(SLOT_SEL_BG), FG("#FFFFFF")], [BG(SLOT_BG), FG(SLOT_FG)]),
+                             SHOW()],
+                            [HIDE()]))]))
+    new_chat = text_box("새대화버튼", "＋  새 대화", SIDE_X, 94, 10, "#FFFFFF", bg=HEADER_BG, width=SIDE_W - 12,
+                        height=18, line_break=True, bold=True, scene_id=scene_id,
+                        script=[WHEN_CLICK(CAST("새 대화 버튼 누름"))])
+    side_bg = text_box("사이드배경", " ", SIDE_X, (SIDE_TOP + SIDE_BOTTOM) / 2, 12, SIDE_BG, bg=SIDE_BG, width=SIDE_W,
+                       height=SIDE_TOP - SIDE_BOTTOM, line_break=True, scene_id=scene_id)
+    return icons, [new_chat, *slots, side_bg]
+
+
 def build():
     scene_id = gen_id()
+    ASSETS.clear()
     bot_rows, me_rows, status_script = ui_scripts()
-    engine_scripts = [main_script(), WHEN_MSG("말풍선 지우기", UNSAY())]
+    engine_scripts = [main_script(), *side_handlers(), WHEN_MSG("말풍선 지우기", UNSAY())]
+    icons, side = side_objects(scene_id)
+    # 맨 앞이 가장 위에 그려진다. 처음에는 표지(썸네일)와 '시작하기' 버튼이 화면을 덮고 있다
     objects = [
+        sprite("시작하기", [picture("시작하기")], -138, -65, 0.25, scene_id=scene_id,
+               script=[WHEN_START(SHOW()), WHEN_CLICK(HIDE(), CAST("챗봇 시작"))]),
+        sprite("표지", [picture("표지")], 0, 0, 0.5, scene_id=scene_id,
+               script=[WHEN_START(SHOW()), WHEN_MSG("챗봇 시작", HIDE())]),
         text_box("상태", "● 연결 중…", 228, 121, 11, "#A7F3D0", align=2, script=status_script, scene_id=scene_id),
         text_box("제목", "🤖 엔봇", LEFT_X, 121, 16, "#FFFFFF", align=1, font="yg-jalnan", scene_id=scene_id),
         text_box("부제", "기억하는 AI 친구", -160, 120, 11, "#C7D2FE", align=1, scene_id=scene_id),
         text_box("헤더", " ", 0, 121, 12, "#FFFFFF", bg=HEADER_BG, width=480, height=28, line_break=True,
                  scene_id=scene_id),
+        *icons, *side,
     ]
     for k in range(1, ROWS + 1):
         y = ROW_TOP - (k - 1) * ROW_STEP
         objects.append(text_box(f"나칸{k}", " ", RIGHT_X, y, 12, ME_FG, bg=ME_BG, align=2, height=ROW_H,
                                 script=me_rows[k], visible=False, scene_id=scene_id))
-        objects.append(text_box(f"봇칸{k}", " ", LEFT_X, y, 12, BOT_FG, bg=BOT_BG, align=1, height=ROW_H,
+        objects.append(text_box(f"봇칸{k}", " ", CHAT_LEFT, y, 12, BOT_FG, bg=BOT_BG, align=1, height=ROW_H,
                                 script=bot_rows[k], visible=False, scene_id=scene_id))
     objects += [
-        text_box("엔봇", "메시지를 입력하고 Enter ⏎   ·   '도움말' 로 사용법 보기", 0, -60, 10, NOTICE_FG,
+        text_box("엔봇", "메시지를 입력하고 Enter ⏎  ·  왼쪽 💾 로 저장", CHAT_CENTER, -60, 10, NOTICE_FG,
                  script=engine_scripts, scene_id=scene_id),
-        text_box("대화배경", " ", 0, 28.5, 12, CHAT_BG, bg=CHAT_BG, width=480, height=157, line_break=True,
-                 scene_id=scene_id),
+        text_box("대화배경", " ", CHAT_CENTER, 28.5, 12, CHAT_BG, bg=CHAT_BG, width=CHAT_W, height=157,
+                 line_break=True, scene_id=scene_id),
     ]
 
     tables = [
@@ -2067,6 +2301,7 @@ def build():
         lst("신조어목록", SLANG_FORMS), lst("이야기주제"), lst("이야기값"), lst("이번주제들"),
         lst("주제뒤말", D.HA_TAILS), lst("끝말목록", _TAILS),
         *[lst(name, phrases) for name, phrases in D.PHRASES.items()],
+        lst("대화-내용"), lst("대화-저장본"),
         lst("대화기록", realtime=True), lst("기억저장소", realtime=True),
     ]
     unknown = set(LISTS) - {l["name"] for l in lists}
@@ -2111,15 +2346,24 @@ def check_project(project):
 
 
 def write_ent(project, path):
+    """.ent = temp/project.json 과 그림 파일들 (temp/ab/cd/image/<id>.png, …/thumb/<id>.png) 을 묶은 tar.gz"""
     data = json.dumps(project, ensure_ascii=False).encode("utf-8")
     mtime = int(time.time())
+    files = [("temp/project.json", data)]
+    for file_id, (image, thumb) in sorted(ASSETS.items()):
+        sub = f"temp/{file_id[:2]}/{file_id[2:4]}"
+        files += [(f"{sub}/image/{file_id}.png", open(image, "rb").read()),
+                  (f"{sub}/thumb/{file_id}.png", open(thumb, "rb").read())]
+    dirs = sorted({"/".join(name.split("/")[:i]) for name, _ in files for i in range(1, name.count("/") + 1)})
     with tarfile.open(path, "w:gz", format=tarfile.USTAR_FORMAT) as tar:
-        d = tarfile.TarInfo("temp")
-        d.type, d.mode, d.mtime = tarfile.DIRTYPE, 0o755, mtime
-        tar.addfile(d)
-        f = tarfile.TarInfo("temp/project.json")
-        f.size, f.mode, f.mtime = len(data), 0o644, mtime
-        tar.addfile(f, io.BytesIO(data))
+        for name in dirs:
+            d = tarfile.TarInfo(name)
+            d.type, d.mode, d.mtime = tarfile.DIRTYPE, 0o755, mtime
+            tar.addfile(d)
+        for name, blob in files:
+            f = tarfile.TarInfo(name)
+            f.size, f.mode, f.mtime = len(blob), 0o644, mtime
+            tar.addfile(f, io.BytesIO(blob))
 
 
 if __name__ == "__main__":

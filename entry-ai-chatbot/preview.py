@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""시뮬레이터로 대화를 돌린 뒤, 글상자들의 상태(위치·정렬·색·글자)를 그대로 그려 preview.png 를 만든다.
+"""시뮬레이터로 대화를 돌린 뒤, 글상자·그림 오브젝트의 상태(위치·정렬·색·글자·모양)를 그대로 그려 preview.png 를 만든다.
 
-엔트리 화면을 캡처한 것이 아니라 project.json 의 글상자 설정으로 다시 그린 '미리보기'다.
+엔트리 화면을 캡처한 것이 아니라 project.json 의 오브젝트 설정으로 다시 그린 '미리보기'다.
 (글꼴은 저장소에 있는 나눔스퀘어로 대신한다. 입력창 모양은 엔트리 것과 비슷하게만 그린다.)
 
 필요: node + playwright (이 작업 환경에는 설치되어 있음)
 사용법: python3 preview.py  →  preview.png
 """
+import base64
 import html
 import json
 import os
@@ -18,6 +19,12 @@ from simulate import Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 S = 1.6  # 무대 480×270 을 몇 배로 그릴지
+
+
+def picture_src(name):
+    """모양 이름 → assets/<이름>.png 를 data: 주소로"""
+    with open(os.path.join(HERE, "assets", f"{name}.png"), "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode()
 
 
 def font_faces():
@@ -38,6 +45,13 @@ def stage_html(session, caption, show_input=True):
         if not st["visible"]:
             continue
         e = st["entity"]
+        if st["pictures"]:   # 그림 오브젝트: 가운데가 (x, y)
+            name = next(p["name"] for p in st["pictures"] if p["id"] == st["picture"])
+            w, h = e["width"] * e["scaleX"] * S, e["height"] * e["scaleY"] * S
+            left, top = (240 + e["x"]) * S - w / 2, (135 - e["y"]) * S - h / 2
+            parts.append(f'<img src="{picture_src(name)}" style="position:absolute;z-index:{len(objects) - z};'
+                         f'left:{left:.1f}px;top:{top:.1f}px;width:{w:.1f}px;height:{h:.1f}px">')
+            continue
         size = e["fontSize"] * S
         bold = "bold" in e["font"]
         weight = 800 if ("jalnan" in e["font"] or bold) else 400
@@ -49,7 +63,10 @@ def stage_html(session, caption, show_input=True):
             w, h = e["width"] * S, e["height"] * S
             left, top = (240 + e["x"]) * S - w / 2, (135 - e["y"]) * S - h / 2
             align = ["center", "left", "right"][e["textAlign"]]
-            style += f"left:{left:.1f}px;top:{top:.1f}px;width:{w:.1f}px;height:{h:.1f}px;text-align:{align};"
+            style += (f"left:{left:.1f}px;top:{top:.1f}px;width:{w:.1f}px;height:{h:.1f}px;text-align:{align};"
+                      f"line-height:1.25;overflow:hidden;")
+            if e["height"] <= 30:   # 낮은 칸(버튼·대화 칸)은 글을 세로 가운데에
+                style += "display:flex;flex-direction:column;justify-content:center;"
         else:
             h = e["height"] * S
             left, top = (240 + e["x"]) * S, (135 - e["y"]) * S - h / 2
@@ -85,18 +102,18 @@ figcaption {{ margin-top:8px; color:#334155; font-size:15px; }}
 def main():
     project = json.load(open(os.path.join(HERE, "project.json"), encoding="utf-8"))
     server = {}
-    first = Session(project, server, username="minsu01", nickname="민수", seed=3, inputs=[
-        "오늘 시험 망쳤어", "수학", "나 고양이 키워", "나비", "/save",
+    user = dict(username="minsu01", nickname="민수")
+    cover = Session(project, {}, **user, autostart=False).run()
+    Session(project, server, **user, seed=2, inputs=["오늘 수학 시험 망쳤어", ("click", "저장1")]).run()
+    first = Session(project, server, **user, seed=3, inputs=[
+        ("click", "새대화버튼"), "나 고양이 키워", "나비", ("click", "저장1"),
     ]).run()
-    again = Session(project, server, username="minsu01", nickname="민수", seed=4, inputs=[
-        "나비가 요즘 밥을 안 먹어",
+    again = Session(project, server, **user, seed=4, inputs=[
+        "나비가 요즘 밥을 안 먹어", ("click", "대화칸2"),
     ]).run()
-    records = Session(project, server, username="minsu01", nickname="민수", seed=5, inputs=[
-        "기록 검색: 나비", "기록 통계",
-    ]).run()
-    stages = [stage_html(first, "① 처음 대화: 공감하고, 되묻고, 들은 걸 기억해요 (/save 로 저장)"),
-              stage_html(again, "② 다시 접속: 지난 대화를 보여 주고, 기억한 '나비'를 알아봐요"),
-              stage_html(records, "③ 대화기록표(테이블): 기록 검색 · 기록 통계")]
+    stages = [stage_html(cover, "① 처음 화면: 표지 — '시작하기'를 누르면 사라지고 챗봇이 시작돼요", show_input=False),
+              stage_html(first, "② 왼쪽 '대화 기록': ＋ 새 대화, 칸마다 💾 (누르면 저장 → 초록 체크)"),
+              stage_html(again, "③ 다시 접속: 저장한 대화들이 그대로 — 칸을 누르면 그 대화로 바뀌어요")]
     with tempfile.TemporaryDirectory() as tmp:
         page_path = os.path.join(tmp, "preview.html")
         open(page_path, "w", encoding="utf-8").write(page(stages))
@@ -104,7 +121,7 @@ def main():
         script = (
             "const { chromium } = require('playwright');"
             "(async () => { const b = await chromium.launch();"
-            "const p = await b.newPage({ viewport: { width: 1640, height: 520 }, deviceScaleFactor: 1.5 });"
+            "const p = await b.newPage({ viewport: { width: 1640, height: 900 }, deviceScaleFactor: 1.5 });"
             f"await p.goto('file://{page_path}'); await p.waitForTimeout(400);"
             f"await p.screenshot({{ path: '{out}', fullPage: true }}); await b.close(); }})();"
         )

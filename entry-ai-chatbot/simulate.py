@@ -208,8 +208,11 @@ def to_num(d):
 # ------------------------------------------------------------ 실행기
 class Session:
     def __init__(self, project, server=None, username=None, nickname=None, inputs=(),
-                 seed=0, now=datetime.datetime(2026, 10, 26, 14, 5), translator=None):
+                 seed=0, now=datetime.datetime(2026, 10, 26, 14, 5), translator=None, autostart=True):
+        """inputs: 차례로 입력할 말. ("click", 오브젝트 이름) 을 넣으면 그때 그 오브젝트를 누른다.
+        autostart: 실행하자마자 표지의 '시작하기' 를 누른다."""
         self.p = project
+        self.autostart = autostart
         self.server = server
         self.username = username
         self.nickname = nickname
@@ -230,7 +233,8 @@ class Session:
             else:
                 self.vars[v["id"]] = v["value"]
                 self.var_names[v["name"]] = v["id"]
-        self.handlers, self.starts = {}, []
+        self.handlers, self.starts, self.clicks = {}, [], {}
+        self.click_frames = []  # 누를 때마다 처리하는 데 걸린 프레임 수
         self.dialog_log = []
         self.answer = ""
         self.rows = []        # 화면글에 들어간 모든 줄 [글, 종류] (화면에는 마지막 몇 줄만 남음)
@@ -240,16 +244,20 @@ class Session:
         self.frames = 0       # 부스트 모드가 아닐 때 걸리는 프레임 수 (반복 한 바퀴, 신호 기다리기마다 1)
         self.turn_frames = []
         self.cast_queue = []
-        # 오브젝트(글상자) 상태
+        # 오브젝트(글상자·그림) 상태
         self.objs = {}
         for o in project["objects"]:
             e = o["entity"]
+            pictures = o["sprite"]["pictures"]
             self.objs[o["id"]] = {"name": o["name"], "text": e.get("text", o.get("text", "")), "visible": e["visible"],
-                                  "bg": e.get("bgColor"), "fg": e.get("colour"), "dialog": None, "entity": e}
+                                  "bg": e.get("bgColor"), "fg": e.get("colour"), "dialog": None, "entity": e,
+                                  "pictures": pictures, "picture": o.get("selectedPictureId")}
             for thread in json.loads(o["script"]):
                 head = thread[0]
                 if head["type"] == "when_run_button_click":
                     self.starts.append((o["id"], thread[1:]))
+                elif head["type"] == "when_object_click":
+                    self.clicks.setdefault(o["id"], []).append(thread[1:])
                 elif head["type"] == "when_message_cast":
                     self.handlers.setdefault(head["params"][1], []).append((o["id"], thread[1:]))
         self.cur = None
@@ -284,6 +292,32 @@ class Session:
 
     def obj(self, name):
         return next(o for o in self.objs.values() if o["name"] == name)
+
+    def shape(self, name):
+        """그림 오브젝트가 지금 쓰는 모양의 이름"""
+        o = self.obj(name)
+        return next(pic["name"] for pic in o["pictures"] if pic["id"] == o["picture"])
+
+    def click(self, name):
+        """오브젝트를 누른다. 숨어 있으면 눌리지 않는다 (False). 누른 뒤 보낸 신호까지 처리한다."""
+        oid = next(i for i, o in self.objs.items() if o["name"] == name)
+        if not self.objs[oid]["visible"]:
+            return False
+        before, self.frames = self.frames, 0
+        saved = self.cur
+        for h in self.clicks.get(oid, []):
+            self.cur = oid
+            try:
+                self.exec_seq(h)
+            except BreakLoop:
+                pass
+            finally:
+                self.cur = saved
+        while self.cast_queue:
+            self.run_handlers(self.cast_queue.pop(0))
+        self.click_frames.append(self.frames)
+        self.frames = before
+        return True
 
     def screen(self):
         """지금 화면에 보이는 말풍선 줄: [(글, 'bot'|'me', 배경색, 글자색)]"""
@@ -376,6 +410,8 @@ class Session:
                 self.exec_seq(t)
             while self.cast_queue:
                 self.run_handlers(self.cast_queue.pop(0))
+            if self.autostart:
+                self.click("시작하기")
         except EndOfInput:
             pass
         return self
@@ -535,9 +571,15 @@ class Session:
             self.dialog_log.append(o["dialog"])
             self.turn_frames.append(self.frames)
             self.frames = 0
-            if not self.inputs:
-                raise EndOfInput()
-            self.answer = self.inputs.pop(0)
+            while True:
+                if not self.inputs:
+                    raise EndOfInput()
+                nxt = self.inputs.pop(0)
+                if isinstance(nxt, tuple) and nxt[0] == "click":
+                    self.click(nxt[1])   # 묻고 기다리는 동안 누른다
+                    continue
+                self.answer = nxt
+                break
             o["dialog"] = None
         elif t == "text_write":
             self.objs[self.cur]["text"] = js_str(vals[0])
@@ -547,6 +589,12 @@ class Session:
         elif t == "text_change_font_color":
             c = js_str(vals[0])
             self.objs[self.cur]["fg"] = c if c.startswith("#") else "#" + c
+        elif t == "change_to_some_shape":
+            o = self.objs[self.cur]
+            pic = next((x for x in o["pictures"] if vals[0] in (x["id"], x["name"])), None)
+            if pic is None:
+                raise EntryError(f"없는 모양 {vals[0]}")
+            o["picture"] = pic["id"]
         elif t == "show":
             self.objs[self.cur]["visible"] = True
         elif t == "hide":
@@ -589,6 +637,8 @@ class Session:
             return self.vars[self.need_var(vals[0])]
         if t == "get_canvas_input_value":
             return self.answer
+        if t == "get_pictures":
+            return vals[0]
         if t == "value_of_index_from_list":
             arr = self.need_list(vals[1])
             idx = vals[3]

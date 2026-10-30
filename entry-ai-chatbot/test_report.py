@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """테스트를 실제로 돌리고, 결과를 그림 두 장으로 만든다.
 
-test_results/테스트결과.png : test_chatbot.py 의 검사 76개를 기능별로 묶어 통과/실패를 보여 준다.
+test_results/테스트결과.png : test_chatbot.py 의 검사들을 기능별로 묶어 통과/실패를 보여 준다.
 test_results/대화결과.png   : 새 기능을 시뮬레이터로 돌린 대화를 작품 화면 모양으로 다시 그린 것.
 
 둘 다 실제 엔트리 화면이 아니라, 엔트리 블록 동작을 옮긴 시뮬레이터(simulate.py)로 얻은 결과다.
@@ -26,7 +26,7 @@ OUT = os.path.join(HERE, "test_results")
 
 GROUPS = {
     "StructureTest": "작품 파일 구조", "ScreenTest": "화면 (글상자)", "ConversationTest": "대화와 생각하기",
-    "StorageTest": "사용자별 저장", "CommandTest": "명령어", "RecordTest": "대화 기록 · 기록표",
+    "StorageTest": "사용자별 저장", "CoverTest": "표지 · 시작하기", "SidebarTest": "왼쪽 대화 기록 · 💾 저장", "CommandTest": "명령어", "RecordTest": "대화 기록 · 기록표",
     "BanmalTest": "반말 / 존댓말", "SmartTest": "계산 · 고르기 · 날짜", "WordChainTest": "끝말잇기",
     "RockPaperScissorsTest": "가위바위보", "SlangTest": "신조어 · 초성체", "PastTalkTest": "예전 대화 참고",
     "DefinitionTest": "단어 뜻 1,726개", "SafetyTest": "안전", "RobustnessTest": "아무 말에도 멈추지 않기",
@@ -40,8 +40,8 @@ LABELS = {
     "test_knowledge_search_finds_every_key": "지식 3,511개를 이진 탐색으로 하나도 빠짐없이 찾아요",
     "test_tables": "대화기록표 테이블이 엔트리 저장 형식이에요",
     "test_table_blocks_only_in_two_functions": "테이블 블록은 기록표 함수 두 곳에만 있어요",
-    "test_functions": "함수 61개가 엔트리 함수 형식이고 값 함수에 반복이 없어요",
-    "test_ent_archive": ".ent 파일을 열면 project.json 이 들어 있어요",
+    "test_functions": "함수 68개가 엔트리 함수 형식이고 값 함수에 반복이 없어요",
+    "test_ent_archive": ".ent 파일을 열면 project.json 과 그림 파일들이 들어 있어요",
     "test_batchim_tables": "받침 글자표가 맞아요",
     "test_bubbles": "말풍선 줄이 화면에 바르게 나와요",
     "test_thinking_row_removed": "'생각하는 중…' 줄이 대답 뒤에 사라져요",
@@ -57,10 +57,22 @@ LABELS = {
     "test_users_are_separate": "사용자마다 기억이 따로 저장돼요",
     "test_prefix_ids_do_not_collide": "비슷한 아이디끼리 섞이지 않아요",
     "test_guest_mode_saves_nothing": "로그인하지 않으면 저장하지 않아요",
-    "test_history_is_trimmed": "서버에는 최근 대화 40줄만 남겨요",
-    "test_saved_only_with_save_command": "/save 해야 다음에 들어와도 이어져요 (안 하면 남지 않아요)",
+    "test_history_is_trimmed": "서버에는 대화마다 최근 30줄만 남겨요",
+    "test_saved_only_with_save_command": "저장해야 다음에 들어와도 이어져요 (안 하면 남지 않아요)",
     "test_end_asks_to_save_first": "저장하지 않고 끝내려 하면 한 번 물어봐요",
     "test_new_clear_and_forget": "/new 새 대화 · /clear 기록 지우기 · /clear all · '잊어줘:'",
+    "test_cover_until_start_clicked": "처음엔 표지가 보이고, '시작하기'를 누르면 사라지며 챗봇이 시작돼요",
+    "test_cover_is_top_and_has_images": "표지가 맨 위에서 무대를 꽉 채우고, 그림이 .ent 형식대로 들어 있어요",
+    "test_new_chat_and_titles": "'＋ 새 대화' · /new 로 새 대화를 만들고, 칸마다 제목과 날짜가 나와요",
+    "test_title_is_shortened": "긴 제목은 줄여서 보여 줘요",
+    "test_save_icon_saves_that_conversation": "칸의 💾 를 누르면 그 대화만 저장되고 아이콘이 바뀌어요",
+    "test_saved_conversations_come_back": "다시 오면 저장한 대화들이 왼쪽에 다시 나와요",
+    "test_switch_conversation": "대화 칸을 누르면 그 대화로 바꿔서 이어 가요",
+    "test_at_most_five_conversations": "대화는 5개까지, 넘으면 가장 오래된 것을 빼요",
+    "test_guest_cannot_save": "로그인하지 않으면 💾 를 눌러도 저장하지 않아요",
+    "test_old_format_is_one_conversation": "예전 저장 형식은 대화 하나로 읽어요",
+    "test_end_counts_unsaved_conversations": "끝낼 때 저장 안 한 대화 수를 알려 줘요",
+    "test_clicks_are_quick": "칸 · 💾 · 새 대화를 누르면 금방 처리돼요",
     "test_save_failure_is_reported": "저장에 실패하면 알려 줘요",
     "test_calculator": "'계산: 12*3' 이 맞게 계산해요",
     "test_translate_help_time": "번역 · 도움말 · 시각 · 종료",
@@ -109,7 +121,7 @@ LABELS = {
     "test_questions_about_meaning": "'이순신 장군이 누구야?' 는 뜻, '내 친구 알아?' 는 아니에요",
     "test_private_info_is_not_remembered_or_logged": "비밀번호 · 전화번호는 기억하지도 기록하지도 않아요",
     "test_crisis_gets_help_numbers": "힘들다는 말에는 상담 전화(1388, 109)를 알려 줘요",
-    "test_random_inputs_never_crash": "아무렇게나 섞은 말 120번에도 블록 오류가 없어요",
+    "test_random_inputs_never_crash": "아무렇게나 섞은 말과 클릭 120번에도 블록 오류가 없어요",
 }
 
 
@@ -232,7 +244,7 @@ def conversation_stages():
         stage_html(run(["야르", "킹받다가 뭐야?"], user="w2"), "② 신조어 · 초성체에 반응하고 뜻도 알려 줘요"),
     ]
     server = {}
-    run(["오늘 수학 시험 망쳤어", "나 강아지 키워"], server=server, user="w3")
+    run(["오늘 수학 시험 망쳤어", "나 강아지 키워", ("click", "저장1")], server=server, user="w3")
     stages.append(stage_html(run(["시험 결과 나왔는데 생각보다 잘 봤어"], server=server, user="w3", seed=2,
                                  now=day + datetime.timedelta(days=1)),
                              "③ 다음 날: 어제 한 말과 오늘 기분을 견줘서 대답해요"))

@@ -21,9 +21,10 @@ import tarfile
 import unittest
 
 import data as D
-from build_project import LOG_FIELDS, MAX_DIARY, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS, dueum_pairs
+from build_project import (LOG_FIELDS, MAX_CONVS, MAX_DIARY, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS, SLOT_BG,
+                           SLOT_SEL_BG, dueum_pairs)
 from dsl import walk_blocks
-from simulate import EntryError, Session
+from simulate import EndOfInput, EntryError, Session
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = json.load(open(os.path.join(HERE, "project.json"), encoding="utf-8"))
@@ -36,6 +37,7 @@ LANGS = ["ko", "en", "ja", "zh-CN", "zh-TW", "es", "fr", "de", "ru", "pt", "th",
 # ("D", [값…]) = Dropdown, ("DD", 메뉴) = DropdownDynamic
 SCHEMA = {
     "when_run_button_click": ([I], 0),
+    "when_object_click": ([I], 0),
     "when_message_cast": ([I, ("DD", "messages")], 0),
     "message_cast": ([("DD", "messages"), I], 0),
     "message_cast_wait": ([("DD", "messages"), I], 0),
@@ -78,6 +80,9 @@ SCHEMA = {
     "change_string_case": ([T, B, T, ("D", ["toUpperCase", "toLowerCase"]), T], 0),
     "remove_dialog": ([I], 0),
     "show": ([I], 0),
+    # src/playground/blocks/block_looks.js, src/playground/block_entry.js
+    "change_to_some_shape": ([B, I], 0),
+    "get_pictures": ([("DD", "pictures")], 0),
     "hide": ([I], 0),
     "text_write": ([B, I], 0),
     "text_change_bg_color": ([B, I], 0),
@@ -105,10 +110,11 @@ VALUE_BLOCKS = {
     "boolean_basic_operator", "boolean_and_or", "boolean_not", "calc_basic", "calc_rand", "quotient_and_mod",
     "get_date", "get_user_name", "get_nickname", "length_of_string", "reverse_of_string", "combine_something",
     "char_at", "substring", "count_match_string", "index_of_string", "replace_string", "change_string_case",
-    "get_translated_string", "text", "number", "text_color",
+    "get_translated_string", "text", "number", "text_color", "get_pictures",
     "get_table_count", "get_value_from_table", "get_value_v_lookup", "get_func_variable",
 }
-EVENT_BLOCKS = {"when_run_button_click", "when_message_cast", "function_create", "function_create_value"}
+EVENT_BLOCKS = {"when_run_button_click", "when_object_click", "when_message_cast", "function_create",
+                "function_create_value"}
 FUNCTIONS = {f["id"]: f for f in PROJECT["functions"]}
 
 
@@ -134,6 +140,8 @@ def ids_of(kind, owner=None):
         return {t["id"] for t in PROJECT["tables"]}
     if kind == "locals":
         return {v["id"] for v in owner.get("localVariables", [])}
+    if kind == "pictures":
+        return {pic["id"] for pic in owner.get("sprite", {}).get("pictures", [])}
     if kind == "variables":
         return {v["id"] for v in PROJECT["variables"] if v["variableType"] != "list"}
     if kind == "lists":
@@ -236,7 +244,7 @@ class StructureTest(unittest.TestCase):
     def test_project_fields(self):
         p = PROJECT
         self.assertEqual(p["aiUtilizeBlocks"], ["translate"])
-        self.assertEqual({o["objectType"] for o in p["objects"]}, {"textBox"})
+        self.assertEqual({o["objectType"] for o in p["objects"]}, {"textBox", "sprite"})
         rt = [v["name"] for v in p["variables"] if v.get("isRealTime")]
         self.assertEqual(sorted(rt), ["기억저장소", "대화기록"])
         names = [v["name"] for v in p["variables"]]
@@ -330,8 +338,18 @@ class StructureTest(unittest.TestCase):
 
     def test_ent_archive(self):
         with tarfile.open(os.path.join(HERE, "entry-ai-chatbot.ent"), "r:gz") as tar:
-            self.assertIn("temp/project.json", tar.getnames())
+            names = tar.getnames()
+            self.assertIn("temp/project.json", names)
             data = json.load(io.TextIOWrapper(tar.extractfile("temp/project.json"), encoding="utf-8"))
+            # 그림 모양마다 그림 파일과 작은 그림 파일이 fileurl / thumbUrl 자리에 PNG 로 들어 있다
+            for o in PROJECT["objects"]:
+                for pic in o["sprite"]["pictures"]:
+                    for url in (pic["fileurl"], pic["thumbUrl"]):
+                        self.assertIn(url, names)
+                        self.assertEqual(tar.extractfile(url).read(8), b"\x89PNG\r\n\x1a\n")
+            for name in names:  # 파일이 든 폴더도 모두 들어 있다
+                if "/" in name:
+                    self.assertIn(name.rsplit("/", 1)[0], names)
         self.assertEqual(data, PROJECT)
 
     def test_batchim_tables(self):
@@ -518,8 +536,8 @@ class StorageTest(unittest.TestCase):
         server = {}
         s = chat(server, "u", [f"메시지 {i}" for i in range(25)] + ["가" * 300], save=True)
         blob = server[s.list_names["대화기록"]][0]
-        self.assertTrue(blob.startswith("u|"))
-        self.assertEqual(blob.count("¶"), MAX_HISTORY_LINES)
+        self.assertTrue(blob.startswith("u|#대화¶"))  # 대화마다 '#대화' 줄로 시작한다
+        self.assertEqual(blob.count("¶"), MAX_HISTORY_LINES + 1)
         line = [x for x in blob.split("¶") if x.startswith("나|") and x.endswith("…")]
         self.assertEqual(len(line), 1)
         self.assertEqual(len(line[0]), MAX_LINE_LEN + 1)
@@ -543,13 +561,13 @@ class StorageTest(unittest.TestCase):
     def test_end_asks_to_save_first(self):
         s = chat({}, "s3", ["안녕", "종료", "종료", "남는 말"])
         r = bot_replies(s)
-        self.assertIn("아직 저장하지 않은 대화가 있어요", r[1])
+        self.assertIn("아직 저장하지 않은 대화가 1개 있어요", r[1])
         self.assertIn("즐거웠어요", r[2])
         self.assertEqual(s.inputs, ["남는 말"])
         s = chat({}, "s4", ["안녕", "/save", "종료", "남는 말"])
         self.assertIn("즐거웠어요", bot_replies(s)[2])  # 저장했으면 바로 끝낸다
         s = chat({}, "s5", ["안녕", "종료", "고마워", "종료"])
-        self.assertIn("아직 저장하지 않은 대화가 있어요", bot_replies(s)[3])  # 다른 말을 했으면 다시 묻는다
+        self.assertIn("아직 저장하지 않은 대화가", bot_replies(s)[3])  # 다른 말을 했으면 다시 묻는다
 
     def test_new_clear_and_forget(self):
         server = {}
@@ -561,13 +579,18 @@ class StorageTest(unittest.TestCase):
         self.assertFalse(any("끝말잇기" in row for row in s.lst("화면글")))  # 화면은 새로
         r = bot_replies(s)[1:]  # (끝말잇기 대답 다음부터: '/new' 대답은 알림 줄 뒤에 있다)
         self.assertEqual(s.var("끝말"), "")  # 놀이도 새로
-        self.assertIn("안녕", [x[6] for x in records(s)])  # /new 는 기록을 지우지 않는다
+        self.assertNotIn("/new", [x[6] for x in records(s)])  # '/new' 는 새 대화에 남기지 않는다
+        convs = s.lst("대화-내용")  # 지난 대화는 지우지 않고 왼쪽 '대화 기록'에 남는다
+        self.assertEqual(len(convs), 2)
+        self.assertIn("|안녕¶", convs[0])
+        self.assertIn("|끝말잇기¶", convs[0])
+        self.assertNotIn("끝말잇기", convs[1])
         self.assertIn("기억을 지웠어요", r[0])
         self.assertIn("기억은 없어요", r[1])
         self.assertNotIn("내 생일", memory(s))
         # /clear: 기록만 지우고 기억은 남긴다 (저장하면 서버 기록도 비워진다)
         s = chat(server, "k", ["/clear", "기억 목록", "/save"])
-        self.assertIn("대화 기록을 지웠어요", bot_replies(s)[0])
+        self.assertIn("이 대화의 기록을 지웠어요", bot_replies(s)[0])
         self.assertIn("내 고양이", bot_replies(s)[1])
         self.assertNotIn("안녕", server[s.list_names["대화기록"]][0])
         # /clear all: 기억과 지난 이야기까지
@@ -592,6 +615,164 @@ class StorageTest(unittest.TestCase):
         self.assertIn("저장 서버에 연결하지 못해서", " ".join(t for _, t, _ in s.transcript_lines()))
         self.assertEqual(bot_replies(s)[1], "b")
         self.assertIn("저장 서버에 연결하지 못해서 지금은 저장할 수 없어요", bot_replies(s)[2])
+
+
+def click(name):
+    return ("click", name)
+
+
+def slots(s):
+    """왼쪽 '대화 기록'에 보이는 칸: [(제목, 날짜, 지금 보는 대화인지, 저장 아이콘 모양)] (위에서부터)"""
+    out = []
+    for k in range(1, MAX_CONVS + 1):
+        o = s.obj(f"대화칸{k}")
+        if not o["visible"]:
+            continue
+        assert s.obj(f"저장{k}")["visible"], "칸이 보이면 저장 아이콘도 보여야 함"
+        title, date = o["text"].split("\n")
+        out.append((title.strip(), date.strip(), o["bg"].upper() == SLOT_SEL_BG.upper(), s.shape(f"저장{k}")))
+    return out
+
+
+def notices(s):
+    """알림 줄을 모두 이은 글 (연달아 나온 알림은 한 줄로 합쳐지므로)"""
+    return " ".join(t for tag, t, _ in s.transcript_lines() if tag == "알림")
+
+
+class CoverTest(unittest.TestCase):
+    def test_cover_until_start_clicked(self):
+        s = Session(PROJECT, {}, username="c1", nickname="민수", inputs=["안녕"], autostart=False).run()
+        self.assertTrue(s.obj("표지")["visible"])
+        self.assertTrue(s.obj("시작하기")["visible"])
+        self.assertEqual(s.dialog_log, [])   # 시작하기를 누르기 전에는 묻지 않는다
+        self.assertEqual(s.inputs, ["안녕"])
+        self.assertEqual(s.shape("표지"), "표지")
+        self.assertFalse(s.obj("대화칸1")["visible"])
+        with self.assertRaises(EndOfInput):  # 누르면 바로 대화가 시작되고, 입력이 떨어질 때까지 이어진다
+            s.click("시작하기")
+        self.assertFalse(s.obj("표지")["visible"])
+        self.assertFalse(s.obj("시작하기")["visible"])
+        self.assertTrue(bot_replies(s))
+        self.assertFalse(s.click("시작하기"), "숨은 버튼은 눌리지 않음")
+
+    def test_cover_is_top_and_has_images(self):
+        objs = PROJECT["objects"]
+        self.assertEqual([o["name"] for o in objs[:2]], ["시작하기", "표지"])  # 맨 앞(맨 위)에 그려진다
+        for o in objs:
+            if o["objectType"] != "sprite":
+                continue
+            for pic in o["sprite"]["pictures"]:
+                fid = pic["filename"]
+                self.assertEqual(pic["fileurl"], f"temp/{fid[:2]}/{fid[2:4]}/image/{fid}.png")
+                self.assertEqual(pic["thumbUrl"], f"temp/{fid[:2]}/{fid[2:4]}/thumb/{fid}.png")
+        cover = next(o for o in objs if o["name"] == "표지")
+        e = cover["entity"]
+        self.assertEqual((e["width"] * e["scaleX"], e["height"] * e["scaleY"]), (480, 270))  # 무대를 꽉 채운다
+
+
+class SidebarTest(unittest.TestCase):
+    def test_new_chat_and_titles(self):
+        s = chat({}, "sb1", ["오늘 시험 망쳤어", "수학", "/new", "나 고양이 키워"])
+        self.assertEqual(slots(s), [("나 고양이 키워", "10/26", True, "저장하기"),
+                                    ("오늘 시험 망쳤어", "10/26", False, "저장하기")])
+        self.assertEqual(s.obj("대화칸2")["bg"].upper(), SLOT_BG.upper())
+        self.assertEqual(s.var("현재대화"), 2)
+        self.assertIn("|나 고양이 키워¶", s.lst("대화-내용")[1])
+        self.assertNotIn("시험", s.lst("대화-내용")[1])
+        # '＋ 새 대화' 버튼도 같은 일을 한다. 가장 최근 대화가 비어 있으면 새로 만들지 않는다
+        s = chat({}, "sb2", ["안녕", click("새대화버튼"), click("새대화버튼"), "나 축구 좋아해"])
+        self.assertEqual([x[0] for x in slots(s)], ["나 축구 좋아해", "안녕"])
+        lines = [(tag, t) for tag, t, _ in s.transcript_lines()]
+        self.assertIn(("봇", "새 대화를 시작해요! 오늘은 무슨 이야기를 해 볼까요?"), lines)
+        self.assertEqual(len(s.lst("대화-내용")), 2)
+
+    def test_title_is_shortened(self):
+        s = chat({}, "sb3", ["우리 강아지가 오늘 산책하다가 넘어졌어"])
+        self.assertEqual(slots(s)[0][0], "우리 강아지가 …")
+
+    def test_save_icon_saves_that_conversation(self):
+        server = {}
+        s = chat(server, "sv", ["오늘 시험 망쳤어", "/new", "나 고양이 키워", click("저장2")])
+        self.assertIn("💾 '오늘 시험 망쳤어' 대화를 저장했어요.", notices(s))
+        self.assertEqual([x[3] for x in slots(s)], ["저장하기", "저장됨"])
+        self.assertEqual(s.obj("상태")["text"], "● 민수님 · 저장 안 됨")  # 지금 보는 대화는 아직
+        blob = server[s.list_names["대화기록"]][0]
+        self.assertIn("시험", blob)
+        self.assertNotIn("고양이", blob)  # 저장한 대화만 서버에 간다
+        self.assertEqual(blob.count("#대화¶"), 1)
+        # 저장한 뒤에 더 이야기하면 다시 '저장하기' 모양
+        s = chat(server, "sv2", ["안녕", click("저장1"), "오늘 뭐 할까?"])
+        self.assertEqual(slots(s)[0][3], "저장하기")
+        self.assertEqual(s.obj("상태")["text"], "● 민수님 · 저장 안 됨")
+        s = chat(server, "sv3", ["안녕", click("저장1")])
+        self.assertEqual(slots(s)[0][3], "저장됨")
+        self.assertEqual(s.obj("상태")["text"], "● 민수님과 대화 중")
+
+    def test_saved_conversations_come_back(self):
+        server = {}
+        chat(server, "back", ["오늘 시험 망쳤어", click("저장1"), "/new", "나 고양이 키워", "나비", click("저장1"),
+                              "/new", "저장 안 할 대화"])
+        s = chat(server, "back", [])
+        self.assertEqual(slots(s), [("나 고양이 키워", "10/26", True, "저장됨"),
+                                    ("오늘 시험 망쳤어", "10/26", False, "저장됨")])
+        shown = [t for tag, t, _ in s.transcript_lines()]
+        self.assertIn("나 고양이 키워", shown)      # 가장 최근 대화를 펼쳐 보여 준다
+        self.assertNotIn("오늘 시험 망쳤어", shown)
+        self.assertEqual(s.obj("상태")["text"], "● 민수님과 대화 중")
+        self.assertIn("내 고양이 이름", memory(s))
+
+    def test_switch_conversation(self):
+        server = {}
+        s = chat(server, "sw", ["오늘 시험 망쳤어", "/new", "나 고양이 키워", click("대화칸2"), "다음엔 잘 볼 거야"])
+        self.assertEqual(s.var("현재대화"), 1)
+        self.assertEqual([x[2] for x in slots(s)], [False, True])
+        convs = s.lst("대화-내용")
+        self.assertIn("|다음엔 잘 볼 거야¶", convs[0])   # 고른 대화에 이어서 남는다
+        self.assertNotIn("다음엔", convs[1])
+        self.assertIn("|나 고양이 키워¶", convs[1])
+        self.assertEqual([x[6] for x in records(s) if x[3] == "나"], ["오늘 시험 망쳤어", "다음엔 잘 볼 거야"])
+        screen = [t.strip() for t, *_ in s.screen()]
+        self.assertIn("오늘 시험 망쳤어", screen)
+        self.assertNotIn("나 고양이 키워", screen)
+        # 지금 보고 있는 칸이나 빈 칸을 누르면 아무 일도 없다
+        s = chat({}, "sw2", ["안녕", click("대화칸1"), click("대화칸3"), "반가워"])
+        self.assertEqual(len(s.lst("대화-내용")), 1)
+        self.assertEqual(bot_replies(s)[1:], bot_replies(chat({}, "sw2", ["안녕", "반가워"]))[1:])
+
+    def test_at_most_five_conversations(self):
+        inputs = []
+        for i in range(MAX_CONVS + 1):
+            inputs += [f"대화 {i + 1}번", "/new"]
+        s = chat({}, "many", inputs)
+        self.assertEqual(len(s.lst("대화-내용")), MAX_CONVS)
+        self.assertIn("가장 오래된 대화는 목록에서 뺐어요.", notices(s))
+        self.assertEqual([x[0] for x in slots(s)], ["새 대화", "대화 6번", "대화 5번", "대화 4번", "대화 3번"])
+
+    def test_guest_cannot_save(self):
+        server = {}
+        s = Session(PROJECT, server, username=None, nickname=None, inputs=["안녕", click("저장1"), "/new", "반가워"]).run()
+        self.assertIn("💾 저장은 로그인했을 때만 할 수 있어요.", notices(s))
+        self.assertEqual(len(slots(s)), 2)
+        for arr in server.values():
+            self.assertEqual(arr, [])
+
+    def test_old_format_is_one_conversation(self):
+        server = {}
+        s = Session(PROJECT, server, username="old", nickname="민수", inputs=[]).run()
+        server[s.list_names["대화기록"]][:] = ["old|나|2026-10-20|10:00|-|0|예전 형식 대화¶봇|2026-10-20|10:00|-|-|그렇군요¶"]
+        s = chat(server, "old", [])
+        self.assertEqual(slots(s), [("예전 형식 대화", "10/20", True, "저장됨")])
+        self.assertIn("예전 형식 대화", [t for _, t, _ in s.transcript_lines()])
+
+    def test_end_counts_unsaved_conversations(self):
+        s = chat({}, "end", ["안녕", "/new", "반가워", "종료"])
+        self.assertIn("아직 저장하지 않은 대화가 2개 있어요", bot_replies(s)[-1])
+
+    def test_clicks_are_quick(self):
+        s = chat({}, "fast", ["오늘 시험 망쳤어", "/new", "나 고양이 키워", click("대화칸2"), click("저장1"),
+                             click("새대화버튼"), "안녕"])
+        self.assertEqual(len(s.click_frames), 3)
+        self.assertLess(max(s.click_frames), 120, s.click_frames)
 
 
 class CommandTest(unittest.TestCase):
@@ -928,7 +1109,7 @@ class WordChainTest(unittest.TestCase):
         self.assertEqual(r[4], "두 글자 이상인 낱말로 말해 주세요!")
         self.assertRegex(r[5], "^사[가-힣]*! 이번엔 ")  # 두음법칙: '력' 차례에 '역사'
         self.assertEqual(r[6], "으… '냥'으로 시작하는 말이 생각 안 나요. 민수님이 이겼어요! 🎉")
-        self.assertTrue(r[7].startswith("아직 저장하지 않은 대화가 있어요"), r[7])  # 놀이가 끝난 뒤의 '그만' 은 끝내기
+        self.assertTrue(r[7].startswith("아직 저장하지 않은 대화가"), r[7])  # 놀이가 끝난 뒤의 '그만' 은 끝내기
 
     def test_hint_mentions_dueum(self):
         # 엔봇이 고를 낱말이 모두 두음법칙 글자('력', '녀'…)로 끝나는 첫 글자를 찾아서 그 글자로 끝나는 말을 한다
@@ -1244,11 +1425,14 @@ class RobustnessTest(unittest.TestCase):
                   "가위바위보", "보", "그만", "주사위", "동전 던져", "중에", "아니면", "vs", "곱하기", "나누기", "부터",
                   "까지", "에서", "사이", "며칠", "월", "일", "디데이", "방금", "뭐라고", "구구단", "단", "내일", "¤",
                   "야르", "ㅎㅇ", "ㅋ", "헐", "개", "킹받", "@", "지난번", "무슨얘기", "저번에", "기억나", "잘", "반모"]
+        buttons = ["새대화버튼", "대화칸1", "대화칸2", "대화칸5", "저장1", "저장2", "저장3"]
         server = {}
         users = ["u1", "u2", "user_3", "4"]
         worst = 0
         for n in range(120):
             inputs = ["".join(rng.choice(pieces) for _ in range(rng.randint(0, 6))) for _ in range(rng.randint(1, 7))]
+            for _ in range(rng.randint(0, 3)):
+                inputs.insert(rng.randint(0, len(inputs)), click(rng.choice(buttons)))
             user = rng.choice(users + [None])
             try:
                 s = Session(PROJECT, server, username=user, nickname=user, inputs=inputs, seed=n).run()
@@ -1256,10 +1440,15 @@ class RobustnessTest(unittest.TestCase):
                 self.fail(f"입력 {inputs!r} (사용자 {user}) 에서 블록 오류: {e}")
             self.assertLessEqual(len(s.lst("화면글")), 9)
             self.assertEqual(len(s.lst("내질문")), len(s.lst("내답변")))
-            worst = max([worst] + s.turn_frames[1:])
+            self.assertLessEqual(len(s.lst("대화-내용")), MAX_CONVS)
+            self.assertEqual(len(s.lst("대화-내용")), len(s.lst("대화-저장본")))
+            worst = max([worst] + s.turn_frames[1:] + s.click_frames)
         self.assertLess(worst, 400, "부스트 모드 없이 한 번 대답하는 데 너무 오래 걸림")
         for item in server[s.list_names["대화기록"]]:
-            self.assertLessEqual(item.count("¶"), MAX_HISTORY_LINES)
+            convs = item.split("#대화¶")[1:]
+            self.assertLessEqual(len(convs), MAX_CONVS)
+            for c in convs:
+                self.assertLessEqual(c.count("¶"), MAX_HISTORY_LINES)
 
 
 if __name__ == "__main__":

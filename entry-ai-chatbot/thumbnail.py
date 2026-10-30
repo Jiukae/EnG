@@ -81,14 +81,16 @@ BUBBLE = """<svg class="bubble" viewBox="0 0 190 130" aria-hidden="true">
 </svg>"""
 
 
-def page():
+def page(cover=False):
+    """cover=True 면 작품 첫 화면(표지)용: 글을 조금 위로 올려 '시작하기' 버튼 자리를 비운다."""
+    top = "43%" if cover else "50%"
     return f"""<!doctype html><html><head><meta charset="utf-8"><style>
 {font_faces()}
 * {{ box-sizing: border-box; margin: 0; }}
 body {{ width: {W}px; height: {H}px; overflow: hidden; font-family: "NanumSquare", sans-serif; }}
 .stage {{ position: relative; width: {W}px; height: {H}px; overflow: hidden;
           background: radial-gradient(900px 700px at 74% 52%, #6D6AF7 0%, #4F46E5 38%, #3730A3 68%, #1E1B4B 100%); }}
-.text {{ position: absolute; left: 112px; top: 50%; transform: translateY(-54%); color: #FFFFFF; }}
+.text {{ position: absolute; left: 112px; top: {top}; transform: translateY(-54%); color: #FFFFFF; }}
 h1 {{ font-size: 212px; font-weight: 900; letter-spacing: -8px; line-height: .95;
       text-shadow: 0 14px 40px rgba(11, 9, 48, .35); }}
 p {{ margin-top: 34px; font-size: 54px; font-weight: 800; letter-spacing: -1px; color: #C7D2FE; }}
