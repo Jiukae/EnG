@@ -163,6 +163,8 @@ def FG(hex_): return blk("text_change_font_color", [color(hex_), None])
 def WHEN_START(*body): return [blk("when_run_button_click", [None]), *body]
 def WHEN_MSG(msg, *body): return [blk("when_message_cast", [None, MSGS[msg]]), *body]
 def WHEN_CLICK(*body): return [blk("when_object_click", [None]), *body]
+def WHEN_KEY(code, *body): return [blk("when_some_key_pressed", [None, str(code)]), *body]
+def KEY_DOWN(code): return blk("is_press_some_key", [str(code), None])  # 그 키를 누르고 있는가?
 def SHAPE(picture_id): return blk("change_to_some_shape", [blk("get_pictures", [picture_id]), None])
 
 

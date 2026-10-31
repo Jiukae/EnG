@@ -7,6 +7,8 @@
 - 리스트 범위를 벗어나거나 substring 범위가 잘못되면 엔트리처럼 오류를 낸다.
 - 실시간 리스트는 여러 실행(세션)이 함께 쓰는 server 딕셔너리에 저장한다.
 - 메시지 '보내고 기다리기'는 받는 스크립트를 끝까지 실행한 뒤 돌아온다.
+- 사용자 입력은 키보드로 친다: 작품이 '전송' 변수를 기다리는 동안 입력 한 줄을 두벌식 키 누름으로 바꿔
+  '키를 눌렀을 때' 스크립트를 차례로 돌리고 마지막에 Enter 를 누른다 (type_keys).
 """
 import datetime
 import json
@@ -26,6 +28,61 @@ class EndOfInput(Exception):
 
 class BreakLoop(Exception):
     pass
+
+
+# ------------------------------------------------------------ 두벌식 자판 (사람이 치는 쪽)
+# 엔트리 키 번호: A~Z 65~90, 0~9 48~57, 그 밖은 Entry.KeyboardCode.codeToKeyCode
+_DUBEOL = dict(zip("ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔㅁㄴㅇㄹㅎㅗㅓㅏㅣㅋㅌㅊㅍㅠㅜㅡ", "QWERTYUIOPASDFGHJKLZXCVBNM"))
+_DUBEOL_SHIFT = dict(zip("ㅃㅉㄸㄲㅆㅒㅖ", "QWERTOP"))
+_SYMBOLS = {",": 188, ".": 190, "/": 191, ";": 186, "'": 222, "[": 219, "]": 221, "\\": 220, "-": 189, "=": 187,
+            "`": 192, " ": 32}
+_SHIFT_SYMBOLS = {"<": 188, ">": 190, "?": 191, ":": 186, '"': 222, "{": 219, "}": 221, "|": 220, "_": 189,
+                  "+": 187, "~": 192, **{c: 48 + i for i, c in enumerate(")!@#$%^&*(")}}
+_CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+_JUNG = ["ㅏ", "ㅐ", "ㅑ", "ㅒ", "ㅓ", "ㅔ", "ㅕ", "ㅖ", "ㅗ", "ㅗㅏ", "ㅗㅐ", "ㅗㅣ", "ㅛ", "ㅜ", "ㅜㅓ", "ㅜㅔ", "ㅜㅣ",
+         "ㅠ", "ㅡ", "ㅡㅣ", "ㅣ"]
+_JONG = ["", "ㄱ", "ㄲ", "ㄱㅅ", "ㄴ", "ㄴㅈ", "ㄴㅎ", "ㄷ", "ㄹ", "ㄹㄱ", "ㄹㅁ", "ㄹㅂ", "ㄹㅅ", "ㄹㅌ", "ㄹㅍ", "ㄹㅎ",
+         "ㅁ", "ㅂ", "ㅂㅅ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ"]
+_JAMO_KEYS = {**{chr(0x3131 + i): None for i in range(51)},   # 한글 자모 51자 (옛 자모는 칠 수 없음)
+              **{j: j for j in _DUBEOL}, **{j: j for j in _DUBEOL_SHIFT}}  # 겹자모(ㄳ, ㅘ …)는 아래에서 채움
+for _j, _keys in [("ㄳ", "ㄱㅅ"), ("ㄵ", "ㄴㅈ"), ("ㄶ", "ㄴㅎ"), ("ㄺ", "ㄹㄱ"), ("ㄻ", "ㄹㅁ"), ("ㄼ", "ㄹㅂ"),
+                  ("ㄽ", "ㄹㅅ"), ("ㄾ", "ㄹㅌ"), ("ㄿ", "ㄹㅍ"), ("ㅀ", "ㄹㅎ"), ("ㅄ", "ㅂㅅ"), ("ㅘ", "ㅗㅏ"),
+                  ("ㅙ", "ㅗㅐ"), ("ㅚ", "ㅗㅣ"), ("ㅝ", "ㅜㅓ"), ("ㅞ", "ㅜㅔ"), ("ㅟ", "ㅜㅣ"), ("ㅢ", "ㅡㅣ")]:
+    _JAMO_KEYS[_j] = _keys
+K_ENTER, K_SHIFT, K_SPACE, K_RIGHT = 13, 16, 32, 39
+
+
+def _jamo_key(j):
+    if j in _DUBEOL:
+        return ord(_DUBEOL[j]), False
+    return ord(_DUBEOL_SHIFT[j]), True
+
+
+def keys_for(text):
+    """글 → [(키 번호, Shift, 필요한 모드)] 두벌식으로 친다. 모드는 '한' / '영' / None(아무 모드나).
+    따로 쓰는 자모(ㅋㅋ, ㅎㅇ)는 앞뒤 글자와 합쳐지지 않게 → 키로 확정한다 (실제 입력기에서도 그렇게 친다)."""
+    out = []
+    for ch in text:
+        code = ord(ch)
+        if 0xAC00 <= code <= 0xD7A3:
+            n = code - 0xAC00
+            jamo = _CHO[n // 588] + _JUNG[(n // 28) % 21] + _JONG[n % 28]
+            out += [(*_jamo_key(j), "한") for j in jamo]
+        elif ch in _JAMO_KEYS and _JAMO_KEYS[ch]:
+            out.append((K_RIGHT, False, None))
+            out += [(*_jamo_key(j), "한") for j in _JAMO_KEYS[ch]]
+            out.append((K_RIGHT, False, None))
+        elif "a" <= ch <= "z" or "A" <= ch <= "Z":
+            out.append((ord(ch.upper()), ch.isupper(), "영"))
+        elif "0" <= ch <= "9":
+            out.append((ord(ch), False, None))
+        elif ch in _SYMBOLS:
+            out.append((_SYMBOLS[ch], False, None))
+        elif ch in _SHIFT_SYMBOLS:
+            out.append((_SHIFT_SYMBOLS[ch], True, None))
+        else:
+            raise ValueError(f"키보드로 칠 수 없는 글자: {ch!r}")
+    return out
 
 
 # ------------------------------------------------------------ JS 형 변환
@@ -208,11 +265,10 @@ def to_num(d):
 # ------------------------------------------------------------ 실행기
 class Session:
     def __init__(self, project, server=None, username=None, nickname=None, inputs=(),
-                 seed=0, now=datetime.datetime(2026, 10, 26, 14, 5), translator=None, autostart=True):
+                 seed=0, now=datetime.datetime(2026, 10, 26, 14, 5), translator=None):
         """inputs: 차례로 입력할 말. ("click", 오브젝트 이름) 을 넣으면 그때 그 오브젝트를 누른다.
-        autostart: 실행하자마자 표지의 '시작하기' 를 누른다."""
+        run() 을 부르기 전에는 작품이 멈춰 있을 때의 모습이다."""
         self.p = project
-        self.autostart = autostart
         self.server = server
         self.username = username
         self.nickname = nickname
@@ -233,8 +289,11 @@ class Session:
             else:
                 self.vars[v["id"]] = v["value"]
                 self.var_names[v["name"]] = v["id"]
-        self.handlers, self.starts, self.clicks = {}, [], {}
+        self.handlers, self.starts, self.clicks, self.keys = {}, [], {}, {}
         self.click_frames = []  # 누를 때마다 처리하는 데 걸린 프레임 수
+        self.key_frames = []    # 키 하나를 처리하는 데 걸린 프레임 수
+        self.pressed = set()    # 지금 누르고 있는 키 (Entry.pressedKeys)
+        self.typed = []         # 친 글 (보낼 때마다)
         self.dialog_log = []
         self.answer = ""
         self.rows = []        # 화면글에 들어간 모든 줄 [글, 종류] (화면에는 마지막 몇 줄만 남음)
@@ -258,6 +317,8 @@ class Session:
                     self.starts.append((o["id"], thread[1:]))
                 elif head["type"] == "when_object_click":
                     self.clicks.setdefault(o["id"], []).append(thread[1:])
+                elif head["type"] == "when_some_key_pressed":
+                    self.keys.setdefault(str(head["params"][1]), []).append((o["id"], thread[1:]))
                 elif head["type"] == "when_message_cast":
                     self.handlers.setdefault(head["params"][1], []).append((o["id"], thread[1:]))
         self.cur = None
@@ -297,6 +358,57 @@ class Session:
         """그림 오브젝트가 지금 쓰는 모양의 이름"""
         o = self.obj(name)
         return next(pic["name"] for pic in o["pictures"] if pic["id"] == o["picture"])
+
+    def press(self, code, shift=False):
+        """키 하나를 누른다 (Shift 를 함께 누르고 있을 수 있음). '키를 눌렀을 때' 스크립트와 그 뒤 신호까지 처리한다."""
+        before, self.frames = self.frames, 0
+        self.pressed = {K_SHIFT, code} if shift else {code}
+        saved = self.cur
+        try:
+            for oid, h in self.keys.get(str(code), []):
+                self.cur = oid
+                try:
+                    self.exec_seq(h)
+                except BreakLoop:
+                    pass
+                finally:
+                    self.cur = saved
+            while self.cast_queue:
+                self.run_handlers(self.cast_queue.pop(0))
+        finally:
+            self.pressed = set()
+        self.key_frames.append(self.frames)
+        self.frames = before
+
+    def type_keys(self, text, enter=True):
+        """두벌식 자판으로 text 를 치고 Enter 를 누른다. 한/영이 다르면 Shift+Space 로 바꾼다."""
+        for code, shift, mode in keys_for(text):
+            if mode is not None and self.var("입력모드") != mode:
+                self.press(K_SPACE, shift=True)
+            self.press(code, shift)
+        if enter:
+            self.press(K_ENTER)
+        self.typed.append(text)
+
+    def is_input_wait(self, b):
+        """'전송' 이 1 이 될 때까지 기다리는 반복 (몸통이 빈 '~이 될 때까지 반복하기')"""
+        c = b["params"][0]
+        return (not b["statements"][0] and isinstance(c, dict) and c["type"] == "boolean_basic_operator"
+                and isinstance(c["params"][0], dict) and c["params"][0]["type"] == "get_variable"
+                and c["params"][0]["params"][0] == self.var_names.get("전송"))
+
+    def next_input(self):
+        """입력을 기다리는 동안 다음 입력 하나를 넣는다: 글이면 치고 Enter, ("click", 이름) 이면 누른다."""
+        if not self.inputs:
+            raise EndOfInput()
+        nxt = self.inputs.pop(0)
+        if isinstance(nxt, tuple) and nxt[0] == "click":
+            self.click(nxt[1])
+        elif isinstance(nxt, tuple) and nxt[0] == "keys":   # ("keys", [(키 번호, Shift), …]) 그대로 누르기
+            for code, shift in nxt[1]:
+                self.press(code, shift)
+        else:
+            self.type_keys(nxt)
 
     def click(self, name):
         """오브젝트를 누른다. 숨어 있으면 눌리지 않는다 (False). 누른 뒤 보낸 신호까지 처리한다."""
@@ -410,8 +522,6 @@ class Session:
                 self.exec_seq(t)
             while self.cast_queue:
                 self.run_handlers(self.cast_queue.pop(0))
-            if self.autostart:
-                self.click("시작하기")
         except EndOfInput:
             pass
         return self
@@ -458,6 +568,15 @@ class Session:
                 pass
             return
         if t == "repeat_while_true":
+            if self.is_input_wait(b):   # 사용자가 입력하고 Enter 를 누를 때까지
+                # '신호 보내기' 로 시작된 스크립트는 기다리는 동안(다음 프레임에) 돈다
+                while self.cast_queue:
+                    self.run_handlers(self.cast_queue.pop(0))
+                self.turn_frames.append(self.frames)
+                self.frames = 0
+                while not truthy_boolean_value(self.ev(p[0])):
+                    self.next_input()
+                return
             try:
                 while True:
                     v = truthy_boolean_value(self.ev(p[0]))
@@ -639,6 +758,8 @@ class Session:
             return self.answer
         if t == "get_pictures":
             return vals[0]
+        if t == "is_press_some_key":
+            return js_number(vals[0]) in self.pressed
         if t == "value_of_index_from_list":
             arr = self.need_list(vals[1])
             idx = vals[3]

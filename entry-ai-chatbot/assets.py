@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """작품 속 그림을 만든다 (assets/*.png). 모두 직접 그린 그림이다.
 
-  표지.png        첫 화면 (대표 이미지와 같은 디자인, 960×540 → 무대에서 0.5배)
-  시작하기.png    표지 위 '시작하기' 버튼 (480×136 → 0.25배)
+  표지.png        멈춰 있을 때 무대를 덮는 그림 (대표 이미지와 같음, 960×540 → 무대에서 0.5배)
   저장하기.png    왼쪽 대화 칸의 저장 아이콘: 아직 저장 안 됨 (64×64 → 0.25배)
   저장됨.png      저장 아이콘: 저장됨
   썸네일/*.png    엔트리 오브젝트 목록에 보이는 작은 그림
@@ -21,11 +20,6 @@ from thumbnail import H, W, page as cover_page
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "assets")
-
-START_BUTTON = """<div class="btn"><span class="play"><svg viewBox="0 0 24 24" width="40" height="40">
-  <path d="M8 5.5 L19 12 L8 18.5 Z" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="2.4" stroke-linejoin="round"/>
-</svg></span>시작하기</div>"""
-
 
 def disk(body, label, shutter, badge):
     """플로피 디스크 모양 저장 아이콘 (64×64). badge 는 오른쪽 위 작은 표시."""
@@ -81,18 +75,10 @@ body {{ display: flex; align-items: center; justify-content: center; font-family
 
 def main():
     os.makedirs(os.path.join(OUT, "썸네일"), exist_ok=True)
-    shot(cover_page(cover=True), os.path.join(OUT, "표지.png"), W, H, scale=0.75)
-    shot(small_page(START_BUTTON, 240, 68, """
-.btn {{ display: flex; align-items: center; gap: 14px; height: 52px; padding: 0 30px 0 8px; border-radius: 26px;
-        background: #FFFFFF; color: #4338CA; font-size: 27px; font-weight: 900; letter-spacing: -.5px;
-        box-shadow: 0 6px 14px rgba(11, 9, 48, .35); }}
-.play {{ display: flex; align-items: center; justify-content: center; width: 38px; height: 38px; border-radius: 50%;
-         background: #4F46E5; }}
-.play svg {{ width: 22px; height: 22px; margin-left: 3px; }}
-""".replace("{{", "{").replace("}}", "}")), os.path.join(OUT, "시작하기.png"), 240, 68, scale=2, transparent=True)
+    shot(cover_page(), os.path.join(OUT, "표지.png"), W, H, scale=0.75)
     for name, svg in ICONS.items():
         shot(small_page(svg, 64, 64), os.path.join(OUT, f"{name}.png"), 64, 64, transparent=True)
-    for name in ["표지", "시작하기", *ICONS]:
+    for name in ["표지", *ICONS]:
         im = Image.open(os.path.join(OUT, f"{name}.png"))
         im.thumbnail((96, 96))
         im.save(os.path.join(OUT, "썸네일", f"{name}.png"))

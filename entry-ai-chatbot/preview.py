@@ -2,7 +2,7 @@
 """시뮬레이터로 대화를 돌린 뒤, 글상자·그림 오브젝트의 상태(위치·정렬·색·글자·모양)를 그대로 그려 preview.png 를 만든다.
 
 엔트리 화면을 캡처한 것이 아니라 project.json 의 오브젝트 설정으로 다시 그린 '미리보기'다.
-(글꼴은 저장소에 있는 나눔스퀘어로 대신한다. 입력창 모양은 엔트리 것과 비슷하게만 그린다.)
+(글꼴은 저장소에 있는 나눔스퀘어로 대신한다. 아래 입력창은 작품 속 글상자다 — 엔트리 '묻고 기다리기' 는 쓰지 않는다.)
 
 필요: node + playwright (이 작업 환경에는 설치되어 있음)
 사용법: python3 preview.py  →  preview.png
@@ -15,7 +15,7 @@ import re
 import subprocess
 import tempfile
 
-from simulate import Session
+from simulate import Session, keys_for
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 S = 1.6  # 무대 480×270 을 몇 배로 그릴지
@@ -37,7 +37,7 @@ def font_faces():
     return "\n".join(re.findall(r"@font-face\s*\{[^}]*\}", src))
 
 
-def stage_html(session, caption, show_input=True):
+def stage_html(session, caption):
     parts = []
     objects = session.p["objects"]
     for z, o in enumerate(objects):
@@ -74,13 +74,6 @@ def stage_html(session, caption, show_input=True):
             style += (f"left:{left:.1f}px;top:{top:.1f}px;height:{h:.1f}px;line-height:{h:.1f}px;"
                       f"transform:translateX({shift});")
         parts.append(f'<div style="{style}">{text}</div>')
-    if show_input:
-        # 엔트리 입력창: 캔버스(640×360) 기준 x=15, y=275, 너비 520 + 안쪽 여백
-        k = 0.75 * S
-        parts.append(f'<div class="input" style="left:{15 * k:.1f}px;top:{275 * k:.1f}px;width:{550 * k:.1f}px;'
-                     f'height:{52 * k:.1f}px;border-radius:{10 * k:.1f}px"></div>'
-                     f'<div class="submit" style="left:{(15 + 556) * k:.1f}px;top:{279 * k:.1f}px;'
-                     f'width:{44 * k:.1f}px;height:{44 * k:.1f}px"></div>')
     return (f'<figure><div class="stage" style="width:{480 * S}px;height:{270 * S}px">{"".join(parts)}</div>'
             f'<figcaption>{html.escape(caption)}</figcaption></figure>')
 
@@ -92,8 +85,6 @@ body {{ margin:0; padding:24px; background:#E2E8F0; font-family:"NanumSquare","W
         display:flex; flex-wrap:wrap; gap:24px; }}
 .stage {{ position:relative; overflow:hidden; background:#FFFFFF; border-radius:10px;
           box-shadow:0 4px 18px rgba(15,23,42,.18); font-family:"NanumSquare","WenQuanYi Zen Hei",sans-serif; }}
-.input {{ position:absolute; z-index:99; border:2px solid #e2e2e2; background:#fff; box-sizing:border-box; }}
-.submit {{ position:absolute; z-index:99; border-radius:50%; background:#4f80ff; }}
 figure {{ margin:0; }}
 figcaption {{ margin-top:8px; color:#334155; font-size:15px; }}
 </style></head><body>{''.join(stages)}</body></html>"""
@@ -103,17 +94,18 @@ def main():
     project = json.load(open(os.path.join(HERE, "project.json"), encoding="utf-8"))
     server = {}
     user = dict(username="minsu01", nickname="민수")
-    cover = Session(project, {}, **user, autostart=False).run()
+    cover = Session(project, {}, **user)   # ▶ 시작 전
     Session(project, server, **user, seed=2, inputs=["오늘 수학 시험 망쳤어", ("click", "저장1")]).run()
     first = Session(project, server, **user, seed=3, inputs=[
         ("click", "새대화버튼"), "나 고양이 키워", "나비", ("click", "저장1"),
+        ("keys", [(c, sh) for c, sh, _ in keys_for("나비는 생선을 좋아하")]),   # 치는 중 (Enter 전)
     ]).run()
     again = Session(project, server, **user, seed=4, inputs=[
         "나비가 요즘 밥을 안 먹어", ("click", "대화칸2"),
     ]).run()
-    stages = [stage_html(cover, "① 처음 화면: 표지 — '시작하기'를 누르면 사라지고 챗봇이 시작돼요", show_input=False),
-              stage_html(first, "② 왼쪽 '대화 기록': ＋ 새 대화, 칸마다 💾 (누르면 저장 → 초록 체크)"),
-              stage_html(again, "③ 다시 접속: 저장한 대화들이 그대로 — 칸을 누르면 그 대화로 바뀌어요")]
+    stages = [stage_html(cover, "① 멈춰 있을 때: 표지 (▶ 시작하면 바로 사라지고 챗봇이 시작돼요)"),
+              stage_html(first, "② 아래 입력창에 키보드로 바로 입력 — 한글 조합 중 · Enter ⏎ 로 보내기"),
+              stage_html(again, "③ 다시 접속: 저장한 대화들이 왼쪽에 — 칸을 누르면 그 대화로 바뀌어요")]
     with tempfile.TemporaryDirectory() as tmp:
         page_path = os.path.join(tmp, "preview.html")
         open(page_path, "w", encoding="utf-8").write(page(stages))

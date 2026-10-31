@@ -21,10 +21,10 @@ import tarfile
 import unittest
 
 import data as D
-from build_project import (LOG_FIELDS, MAX_CONVS, MAX_DIARY, MAX_HISTORY_LINES, MAX_LINE_LEN, MAX_RECORDS, SLOT_BG,
-                           SLOT_SEL_BG, dueum_pairs)
+from build_project import (INPUT_MAX, INPUT_SHOW, LOG_FIELDS, MAX_CONVS, MAX_DIARY, MAX_HISTORY_LINES,
+                           MAX_LINE_LEN, MAX_RECORDS, SLOT_BG, SLOT_SEL_BG, dueum_pairs)
 from dsl import walk_blocks
-from simulate import EndOfInput, EntryError, Session
+from simulate import EntryError, Session, keys_for
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PROJECT = json.load(open(os.path.join(HERE, "project.json"), encoding="utf-8"))
@@ -38,6 +38,8 @@ LANGS = ["ko", "en", "ja", "zh-CN", "zh-TW", "es", "fr", "de", "ru", "pt", "th",
 SCHEMA = {
     "when_run_button_click": ([I], 0),
     "when_object_click": ([I], 0),
+    "when_some_key_pressed": ([I, ("K",)], 0),
+    "is_press_some_key": ([("K",), T], 0),
     "when_message_cast": ([I, ("DD", "messages")], 0),
     "message_cast": ([("DD", "messages"), I], 0),
     "message_cast_wait": ([("DD", "messages"), I], 0),
@@ -110,11 +112,14 @@ VALUE_BLOCKS = {
     "boolean_basic_operator", "boolean_and_or", "boolean_not", "calc_basic", "calc_rand", "quotient_and_mod",
     "get_date", "get_user_name", "get_nickname", "length_of_string", "reverse_of_string", "combine_something",
     "char_at", "substring", "count_match_string", "index_of_string", "replace_string", "change_string_case",
-    "get_translated_string", "text", "number", "text_color", "get_pictures",
+    "get_translated_string", "text", "number", "text_color", "get_pictures", "is_press_some_key",
     "get_table_count", "get_value_from_table", "get_value_v_lookup", "get_func_variable",
 }
-EVENT_BLOCKS = {"when_run_button_click", "when_object_click", "when_message_cast", "function_create",
-                "function_create_value"}
+EVENT_BLOCKS = {"when_run_button_click", "when_object_click", "when_some_key_pressed", "when_message_cast",
+                "function_create", "function_create_value"}
+# 엔트리 키 고르기 목록 (src/playground/blocks/inputs/keyboard.js 의 keyInputList)
+KEY_CODES = {str(c) for c in [8, 9, 13, 16, 17, 18, 27, 32, 37, 38, 39, 40, *range(48, 58), *range(65, 91),
+                              186, 187, 188, 189, 190, 191, 192, 219, 220, 221, 222]}
 FUNCTIONS = {f["id"]: f for f in PROJECT["functions"]}
 
 
@@ -210,6 +215,9 @@ class StructureTest(unittest.TestCase):
                 elif k == ("P",):
                     if not (isinstance(p, dict) and p["type"] == "function_field_label"):
                         problems.append(f"{t}[{i}] 함수 이름표 자리에 {p!r}")
+                elif k == ("K",):
+                    if p not in KEY_CODES:
+                        problems.append(f"{t}[{i}] 키 번호 {p!r}")
                 elif isinstance(k, tuple) and k[0] == "D":
                     if p not in k[1]:
                         problems.append(f"{t}[{i}] 드롭다운 값 {p!r}")
@@ -404,7 +412,6 @@ class ScreenTest(unittest.TestCase):
         for k in range(1, 10):
             self.assertFalse(s.obj(f"봇칸{k}")["visible"] and s.obj(f"나칸{k}")["visible"])
         self.assertEqual(s.obj("상태")["text"], "● 민수님 · 저장 안 됨")  # /save 전
-        self.assertIsNone(s.obj("엔봇")["dialog"], "묻기 말풍선은 지워져야 함")
         self.assertEqual(chat({}, "ui3", ["안녕"], save=True).obj("상태")["text"], "● 민수님과 대화 중")
 
     def test_thinking_row_removed(self):
@@ -534,13 +541,16 @@ class StorageTest(unittest.TestCase):
 
     def test_history_is_trimmed(self):
         server = {}
-        s = chat(server, "u", [f"메시지 {i}" for i in range(25)] + ["가" * 300], save=True)
+        s = chat(server, "u", [f"메시지 {i}" for i in range(25)] + ["가" * 300, "도움말"], save=True)
         blob = server[s.list_names["대화기록"]][0]
         self.assertTrue(blob.startswith("u|#대화¶"))  # 대화마다 '#대화' 줄로 시작한다
         self.assertEqual(blob.count("¶"), MAX_HISTORY_LINES + 1)
-        line = [x for x in blob.split("¶") if x.startswith("나|") and x.endswith("…")]
-        self.assertEqual(len(line), 1)
-        self.assertEqual(len(line[0]), MAX_LINE_LEN + 1)
+        lines = blob.split("¶")
+        self.assertIn("가" * INPUT_MAX, [x.rsplit("|", 1)[-1] for x in lines])  # 입력창에는 100자까지만 들어간다
+        long = [x for x in lines if x.endswith("…")]   # 긴 줄('도움말' 대답 등)은 줄여서 남긴다
+        self.assertTrue(long)
+        self.assertEqual({len(x) for x in long}, {MAX_LINE_LEN + 1})
+        self.assertLessEqual(max(len(x) for x in lines), MAX_LINE_LEN + 1)
 
     def test_saved_only_with_save_command(self):
         server = {}
@@ -640,24 +650,18 @@ def notices(s):
 
 
 class CoverTest(unittest.TestCase):
-    def test_cover_until_start_clicked(self):
-        s = Session(PROJECT, {}, username="c1", nickname="민수", inputs=["안녕"], autostart=False).run()
+    def test_cover_shows_until_run(self):
+        s = Session(PROJECT, {}, username="c1", nickname="민수", inputs=["안녕"])   # 아직 ▶ 시작 전
         self.assertTrue(s.obj("표지")["visible"])
-        self.assertTrue(s.obj("시작하기")["visible"])
-        self.assertEqual(s.dialog_log, [])   # 시작하기를 누르기 전에는 묻지 않는다
-        self.assertEqual(s.inputs, ["안녕"])
         self.assertEqual(s.shape("표지"), "표지")
-        self.assertFalse(s.obj("대화칸1")["visible"])
-        with self.assertRaises(EndOfInput):  # 누르면 바로 대화가 시작되고, 입력이 떨어질 때까지 이어진다
-            s.click("시작하기")
+        self.assertNotIn("시작하기", [o["name"] for o in PROJECT["objects"]])   # 따로 누를 버튼은 없다
+        s.run()   # ▶ 시작하면 바로 사라지고 챗봇이 시작된다
         self.assertFalse(s.obj("표지")["visible"])
-        self.assertFalse(s.obj("시작하기")["visible"])
-        self.assertTrue(bot_replies(s))
-        self.assertFalse(s.click("시작하기"), "숨은 버튼은 눌리지 않음")
+        self.assertEqual(bot_replies(s)[:1], bot_replies(chat({}, "c1", ["안녕"])))
 
     def test_cover_is_top_and_has_images(self):
         objs = PROJECT["objects"]
-        self.assertEqual([o["name"] for o in objs[:2]], ["시작하기", "표지"])  # 맨 앞(맨 위)에 그려진다
+        self.assertEqual(objs[0]["name"], "표지")  # 맨 앞(맨 위)에 그려진다
         for o in objs:
             if o["objectType"] != "sprite":
                 continue
@@ -665,9 +669,143 @@ class CoverTest(unittest.TestCase):
                 fid = pic["filename"]
                 self.assertEqual(pic["fileurl"], f"temp/{fid[:2]}/{fid[2:4]}/image/{fid}.png")
                 self.assertEqual(pic["thumbUrl"], f"temp/{fid[:2]}/{fid[2:4]}/thumb/{fid}.png")
-        cover = next(o for o in objs if o["name"] == "표지")
+        cover = objs[0]
         e = cover["entity"]
         self.assertEqual((e["width"] * e["scaleX"], e["height"] * e["scaleY"]), (480, 270))  # 무대를 꽉 채운다
+        self.assertEqual([t[0]["type"] for t in json.loads(cover["script"])], ["when_run_button_click"])
+
+
+# ------------------------------------------------------------------ 한글 입력기
+K_ENTER, K_BACK, K_SHIFT, K_SPACE, K_ESC = 13, 8, 16, 32, 27
+
+
+def ready(user="in"):
+    """▶ 시작해서 엔봇이 입력을 기다리는 상태의 세션"""
+    return Session(PROJECT, {}, username=user, nickname="민수", inputs=[]).run()
+
+
+def shown(s):
+    """입력창에 보이는 글 (끝의 '|' 는 커서)"""
+    return s.obj("입력글자")["text"]
+
+
+def keys(text):
+    return ("keys", [(code, shift) for code, shift, _ in keys_for(text)])
+
+
+class InputTest(unittest.TestCase):
+    def test_no_ask_block(self):
+        self.assertNotIn("ask_and_wait", {b["type"] for _o, b in walk_blocks(PROJECT)})
+
+    def test_every_syllable_can_be_typed(self):
+        """가~힣 11,172자를 섞은 순서로 두벌식으로 쳐서 블록으로 조합하면 그대로 나온다."""
+        syllables = [chr(0xAC00 + i) for i in range(11172)]
+        random.Random(3).shuffle(syllables)
+        s = ready()
+        for i in range(0, len(syllables), 50):
+            chunk = "".join(syllables[i:i + 50])
+            for name in ["입력글", "입력초", "입력중", "입력종"]:
+                s.vars[s.var_names[name]] = ""
+            s.steps = 0
+            s.type_keys(chunk, enter=False)
+            s.press(K_ESC)   # 조합 중인 글자 확정
+            self.assertEqual(s.var("입력글"), chunk)
+        self.assertEqual(max(s.key_frames), 0, "키 하나는 한 프레임 안에 처리해야 함")
+
+    def test_typing_shows_composition(self):
+        s = ready()
+        self.assertEqual(shown(s), "메시지를 입력하고 Enter ⏎")
+        self.assertEqual(s.obj("입력글자")["fg"].upper(), "#94A3B8")
+        steps = []
+        for code, shift, _ in keys_for("닭이 왔어"):
+            s.press(code, shift)
+            steps.append(shown(s))
+        self.assertEqual(steps, ["ㄷ|", "다|", "달|", "닭|", "닭ㅇ|", "닭이|", "닭이 |", "닭이 ㅇ|", "닭이 오|",
+                                 "닭이 와|", "닭이 왔|", "닭이 왔ㅇ|", "닭이 왔어|"])
+        self.assertEqual(s.obj("입력글자")["fg"].upper(), "#1E293B")
+
+    def test_backspace_removes_one_jamo(self):
+        s = ready()
+        s.type_keys("안녕 닭", enter=False)
+        out = []
+        for _ in range(7):
+            s.press(K_BACK)
+            out.append(shown(s))
+        self.assertEqual(out, ["안녕 달|", "안녕 다|", "안녕 ㄷ|", "안녕 |", "안녕|", "안|", "메시지를 입력하고 Enter ⏎"])
+        s.type_keys("왜값", enter=False)
+        s.press(K_BACK)
+        self.assertEqual(shown(s), "왜갑|")
+        for _ in range(3):
+            s.press(K_BACK)
+        self.assertEqual(shown(s), "왜|")   # 확정된 글자는 한 글자씩
+
+    def test_shift_and_korean_english_switch(self):
+        s = ready()
+        for code, shift in [(81, False), (81, True), (87, True), (65, False)]:   # q, Shift+q, Shift+w, a
+            s.press(code, shift)
+        self.assertEqual(shown(s), "ㅂㅃㅉㅁ|")
+        s.press(79, True)   # Shift+o: ㅒ → 'ㅁ' 과 합쳐 '먜'
+        self.assertEqual(shown(s), "ㅂㅃㅉ먜|")
+        s.press(K_ESC)
+        s.press(K_SPACE, shift=True)                # Shift+Space → 영어
+        self.assertEqual(s.obj("한영버튼")["text"], "A")
+        s.press(65)
+        s.press(65, True)
+        s.press(49, True)
+        self.assertEqual(shown(s), "ㅂㅃㅉ먜aA!|")
+        s.click("한영버튼")                          # 버튼을 눌러도 바뀐다
+        self.assertEqual(s.obj("한영버튼")["text"], "한")
+        s.press(65)
+        self.assertEqual(shown(s), "ㅂㅃㅉ먜aA!ㅁ|")
+
+    def test_enter_and_send_button(self):
+        s = chat({}, "in2", ["", "   ", "안녕", keys("반가워"), click("보내기버튼"), "Hello"])
+        self.assertEqual([t for tag, t, _ in s.transcript_lines() if tag == "나"], ["안녕", "반가워", "Hello"])
+        self.assertEqual(s.var("입력글"), "")
+
+    def test_input_limit_and_long_text(self):
+        s = ready()
+        s.type_keys("가나다라마" * 30, enter=False)
+        self.assertEqual(len(s.var("입력글")) + len(s.var("조합글")), INPUT_MAX)   # 조합 중인 글자까지
+        self.assertTrue(shown(s).startswith("…"))
+        self.assertEqual(len(shown(s)), INPUT_SHOW + 1)   # … + 마지막 글자들 + 커서
+
+    def test_keys_ignored_before_ready_and_after_end(self):
+        s = Session(PROJECT, {}, username="in3", nickname="민수")
+        s.press(65)
+        self.assertEqual(s.var("입력글"), "")
+        s = chat({}, "in3", ["종료"])
+        self.assertIn("대화가 끝났어요", shown(s))
+        s.type_keys("안녕", enter=False)
+        self.assertIn("대화가 끝났어요", shown(s))
+
+    def test_key_scripts_have_no_loops(self):
+        """키 스크립트(와 그 안에서 부르는 함수)에는 반복이 없어야 키 하나가 한 번에 처리된다."""
+        loops = {"repeat_basic", "repeat_inf", "repeat_while_true", "wait_second", "message_cast_wait"}
+        funcs = {f["id"]: json.loads(f["content"]) for f in PROJECT["functions"]}
+
+        def walk(b, seen):
+            yield b
+            if b["type"].startswith("func_") and b["type"][5:] not in seen:
+                seen.add(b["type"][5:])
+                for t in funcs[b["type"][5:]]:
+                    for x in t:
+                        yield from walk(x, seen)
+            for p in b["params"]:
+                if isinstance(p, dict):
+                    yield from walk(p, seen)
+            for st in b.get("statements", []):
+                for x in st:
+                    yield from walk(x, seen)
+
+        n = 0
+        for o in PROJECT["objects"]:
+            for t in json.loads(o["script"]):
+                if t[0]["type"] == "when_some_key_pressed":
+                    n += 1
+                    found = {b["type"] for x in t[1:] for b in walk(x, set())} & loops
+                    self.assertEqual(found, set(), t[0]["params"][1])
+        self.assertGreaterEqual(n, 50)
 
 
 class SidebarTest(unittest.TestCase):
@@ -1138,7 +1276,7 @@ class WordChainTest(unittest.TestCase):
 class RockPaperScissorsTest(unittest.TestCase):
     def test_rounds_and_score(self):
         for seed in range(4):
-            s = play(["가위바위보", "가위", "바위", "보", "✊", "그만", "안녕"], seed=seed)
+            s = play(["가위바위보", "가위", "바위", "보", "주먹", "그만", "안녕"], seed=seed)
             r = bot_replies(s)
             self.assertIn("하나를 내 주세요", r[0])
             me = bot = 0
@@ -1277,7 +1415,7 @@ class PastTalkTest(unittest.TestCase):
         for seed in range(8):
             server = {}
             visit(server, ["오늘 수학 시험 망쳤어", "나 강아지 키워", "강아지랑 산책해서 너무 좋았어"], 0)
-            replies = bot_replies(visit(server, ["음", "음…", "흠"], 1, seed=seed))
+            replies = bot_replies(visit(server, ["음", "음...", "흠"], 1, seed=seed))
             found = found or any("그러고 보니 어제 " in r and "그 뒤로 어떻게 됐어요?" in r for r in replies)
         self.assertTrue(found)
 
@@ -1418,12 +1556,12 @@ class SafetyTest(unittest.TestCase):
 class RobustnessTest(unittest.TestCase):
     def test_random_inputs_never_crash(self):
         rng = random.Random(7)
-        pieces = ["안녕", "기억해:", "잊어줘:", "번역:", "계산:", "=", ":", "¶", "|", " ", "1", "0", "-", "+", "?",
-                  "가나다", "abc", "ㅋㅋ", "도움말", "기억 목록", "새 대화", "몇 시", "{이름}", "[사실:x]", "…", "😀",
+        pieces = ["안녕", "기억해:", "잊어줘:", "번역:", "계산:", "=", ":", "\\", "|", " ", "1", "0", "-", "+", "?",
+                  "가나다", "abc", "ㅋㅋ", "도움말", "기억 목록", "새 대화", "몇 시", "{이름}", "[사실:x]", "...", "~",
                   "내", "내 ", "나는", "좋아해", "싫어", "이야", "했어", "봤어", "뭐야", "이름은", "살", "12살",
                   "고양이", "시험", "때문에", "해서", "몰라", "응", "너는", "a" * 40, "반말 써", "존댓말", "끝말잇기",
                   "가위바위보", "보", "그만", "주사위", "동전 던져", "중에", "아니면", "vs", "곱하기", "나누기", "부터",
-                  "까지", "에서", "사이", "며칠", "월", "일", "디데이", "방금", "뭐라고", "구구단", "단", "내일", "¤",
+                  "까지", "에서", "사이", "며칠", "월", "일", "디데이", "방금", "뭐라고", "구구단", "단", "내일", "`",
                   "야르", "ㅎㅇ", "ㅋ", "헐", "개", "킹받", "@", "지난번", "무슨얘기", "저번에", "기억나", "잘", "반모"]
         buttons = ["새대화버튼", "대화칸1", "대화칸2", "대화칸5", "저장1", "저장2", "저장3"]
         server = {}

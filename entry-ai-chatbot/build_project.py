@@ -31,9 +31,9 @@ import tarfile
 import time
 
 import data as D
-from dsl import (AND, ASK, BG, BREAK, CAST, ELIF_CHAIN, FG, FUNCS, HIDE, HIDE_ANSWER, IF, IFELSE, LISTS, MSGS,
-                 NOT, OR, REPEAT, SCAN, SHAPE, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNSAY, UNTIL, V, VARS, WAIT,
-                 WHEN_CLICK, WHEN_MSG, WHEN_START, WRITE, Func, answer, append, calc, charat, chg, clear, clear_many,
+from dsl import (AND, BG, BREAK, CAST, ELIF_CHAIN, FG, FUNCS, HIDE, IF, IFELSE, KEY_DOWN, LISTS, MSGS,
+                 NOT, OR, REPEAT, SCAN, SHAPE, SHOW, TABLES, TAPPEND, TDELETE, TOPEN, TSET, UNTIL, V, VARS, WAIT,
+                 WHEN_CLICK, WHEN_KEY, WHEN_MSG, WHEN_START, WRITE, Func, append, calc, charat, chg, clear, clear_many,
                  contains, count, date, empty, eq, find, gen_id, gt, included, item, join, llen, lower, lt, minus, mod,
                  nickname, quot, pick, plus, rand, remove, repl, reverse, setitem, setv, slen, starts, sub, tcount,
                  translate, username, walk_blocks)
@@ -77,6 +77,38 @@ SIDE_X, SIDE_W, SIDE_TOP, SIDE_BOTTOM = -184, 112, 107, -66
 SLOT_X, SLOT_W, SLOT_H, SLOT_TOP, SLOT_STEP, ICON_X = -190, 88, 24, 68, 28, -137
 SIDE_BG, SLOT_BG, SLOT_FG, SLOT_SEL_BG = "#1E1B4B", "#2A2766", "#C7D2FE", "#4F46E5"
 ASSET_DIR = os.path.join(HERE, "assets")
+# 아래쪽 입력창 (엔트리 '묻고 기다리기' 대신 키보드로 직접 입력받는 한글 입력기)
+INPUT_Y, HINT_Y = -86, -117
+INPUT_FG, INPUT_BG, KEYCAP_BG, KEYCAP_FG = "#1E293B", "#EEF2FF", "#C7D2FE", "#3730A3"
+INPUT_MAX, INPUT_SHOW = 100, 34   # 입력할 수 있는 글자 수, 입력창에 보이는 글자 수
+
+# ---------------------------------------------------------------- 한글 입력기 (두벌식)
+# 엔트리는 키를 누르면 물리 키 번호(event.code)로 '키를 눌렀을 때' 신호를 보내므로, 키마다 두벌식 자모를 정해 두고
+# 블록으로 글자를 조합한다. 엔트리에는 '번호 → 글자' 블록이 없어서, 가~힣 11,172자를 이은 글(변수 '한글표')에서
+# (초성×588 + 중성×28 + 종성 + 1) 번째 글자를 꺼낸다.
+CHO = "ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ"
+JUNG = "ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ"
+JONG = "ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ"   # 받침 1~27 (0 은 받침 없음)
+HANGUL = "".join(chr(0xAC00 + i) for i in range(19 * 21 * 28))
+DOUBLE_VOWELS = {"ㅘ": "ㅗㅏ", "ㅙ": "ㅗㅐ", "ㅚ": "ㅗㅣ", "ㅝ": "ㅜㅓ", "ㅞ": "ㅜㅔ", "ㅟ": "ㅜㅣ", "ㅢ": "ㅡㅣ"}
+DOUBLE_FINALS = {"ㄳ": "ㄱㅅ", "ㄵ": "ㄴㅈ", "ㄶ": "ㄴㅎ", "ㄺ": "ㄹㄱ", "ㄻ": "ㄹㅁ", "ㄼ": "ㄹㅂ", "ㄽ": "ㄹㅅ",
+                 "ㄾ": "ㄹㅌ", "ㄿ": "ㄹㅍ", "ㅀ": "ㄹㅎ", "ㅄ": "ㅂㅅ"}
+# '|ㅗㅏ|ㅗㅐ|…|' 에서 '|앞뒤|' 를 찾으면 (위치-1)/3+1 번째가 합친 글자
+VOWEL_PAIRS = "|" + "|".join(DOUBLE_VOWELS.values()) + "|"
+FINAL_PAIRS = "|" + "|".join(DOUBLE_FINALS.values()) + "|"
+# (엔트리 키 번호, 영어, 영어+Shift, 한글, 한글+Shift)
+KEYS = [(ord(k), k.lower(), k, ko, ko_shift) for k, ko, ko_shift in [
+    ("Q", "ㅂ", "ㅃ"), ("W", "ㅈ", "ㅉ"), ("E", "ㄷ", "ㄸ"), ("R", "ㄱ", "ㄲ"), ("T", "ㅅ", "ㅆ"), ("Y", "ㅛ", "ㅛ"),
+    ("U", "ㅕ", "ㅕ"), ("I", "ㅑ", "ㅑ"), ("O", "ㅐ", "ㅒ"), ("P", "ㅔ", "ㅖ"),
+    ("A", "ㅁ", "ㅁ"), ("S", "ㄴ", "ㄴ"), ("D", "ㅇ", "ㅇ"), ("F", "ㄹ", "ㄹ"), ("G", "ㅎ", "ㅎ"), ("H", "ㅗ", "ㅗ"),
+    ("J", "ㅓ", "ㅓ"), ("K", "ㅏ", "ㅏ"), ("L", "ㅣ", "ㅣ"),
+    ("Z", "ㅋ", "ㅋ"), ("X", "ㅌ", "ㅌ"), ("C", "ㅊ", "ㅊ"), ("V", "ㅍ", "ㅍ"), ("B", "ㅠ", "ㅠ"), ("N", "ㅜ", "ㅜ"),
+    ("M", "ㅡ", "ㅡ")]]
+KEYS += [(48 + i, str(i), ")!@#$%^&*("[i], str(i), ")!@#$%^&*("[i]) for i in range(10)]
+KEYS += [(code, a, b, a, b) for code, a, b in [
+    (186, ";", ":"), (187, "=", "+"), (188, ",", "<"), (189, "-", "_"), (190, ".", ">"), (191, "/", "?"),
+    (192, "`", "~"), (219, "[", "{"), (220, "\\", "|"), (221, "]", "}"), (222, "'", '"')]]
+K_ENTER, K_BACKSPACE, K_SHIFT, K_SPACE, K_ESC, K_LEFT, K_RIGHT = 13, 8, 16, 32, 27, 37, 39
 
 
 def read_csv(name):
@@ -225,6 +257,16 @@ CONV_NEW = Func("새 대화 만들기")
 CONV_SAVE = Func("대화 저장하기", ["번호"])
 DRAW_SIDE = Func("대화 목록 그리기")
 STATUS_UPDATE = Func("저장 상태 표시")
+# 한글 입력기 (반복 블록 없이 키 하나를 한 번에 처리한다)
+IN_COMPOSE = Func("조합 글자 만들기")
+IN_COMMIT = Func("글자 확정")
+IN_JA = Func("자음 넣기", ["자음"])
+IN_MO = Func("모음 넣기", ["모음"])
+IN_KEY = Func("키 넣기", ["글자", "Shift 글자", "한글", "Shift 한글"])
+IN_BACK = Func("입력 지우기")
+IN_SEND = Func("입력 보내기")
+IN_MODE = Func("한영 바꾸기")
+IN_DRAW = Func("입력창 그리기")
 
 # ================================================================ 지식 찾기 · 대화기록표
 KNOWLEDGE = Func("지식 찾기", ["종류", "낱말"], value=True)
@@ -844,6 +886,7 @@ HELP = SEP.join([
     "몇 시야? · 종료",
     "왼쪽 '＋ 새 대화' 나 /new 새 대화 · 대화 칸을 누르면 그 대화로",
     "왼쪽 💾 를 누르면 그 대화를 저장해요 (/save 도 돼요)",
+    "입력: Enter ⏎ 보내기 · Backspace 지우기 · Shift+Space 한/영",
     "/clear 기록 지우기 · /clear all 모두 지우기",
 ])
 TEACH_FORMAT = "이렇게 입력해 주세요 → 기억해: 질문 = 답 (예: 기억해: 내 별명 = 꼬마)"
@@ -1996,16 +2039,136 @@ CONV_SAVE.define(
 
 
 
+# ================================================================ 한글 입력기
+_cho, _jung, _jong = (lambda: V("입력초")), (lambda: V("입력중")), (lambda: V("입력종"))
+_has = lambda v: gt(slen(v), 0)
+_none = lambda v: eq(slen(v), 0)
+IN_COMPOSE.define(
+    # 지금 조합 중인 초성·중성·종성 → 글자 하나 ('조합글')
+    ELIF_CHAIN(
+        (AND(_has(_cho()), _has(_jung())),
+         [setv("받침번호", 0), IF(_has(_jong()), setv("받침번호", find(JONG, _jong()))),
+          setv("조합글", charat(V("한글표"), plus(plus(plus(calc(minus(find(CHO, _cho()), 1), "MULTI", 588),
+                                                        calc(minus(find(JUNG, _jung()), 1), "MULTI", 28)),
+                                                   V("받침번호")), 1)))]),
+        (_has(_cho()), [setv("조합글", _cho())]),
+        otherwise=[setv("조합글", _jung())]),
+)
+IN_COMMIT.define(
+    IN_COMPOSE(),
+    setv("입력글", join(V("입력글"), V("조합글"))),
+    setv("입력초", ""), setv("입력중", ""), setv("입력종", ""),
+)
+_ja = lambda: IN_JA.p("자음")
+IN_JA.define(
+    setv("받침짝", find(FINAL_PAIRS, join("|", _jong(), _ja(), "|"))),
+    ELIF_CHAIN(
+        # 받침 자리가 비어 있으면 받침으로 (ㄸ ㅃ ㅉ 는 받침이 못 됨)
+        (AND(_has(_cho()), _has(_jung()), _none(_jong()), contains(JONG, _ja())), [setv("입력종", _ja())]),
+        # 겹받침 (ㄹ+ㄱ → ㄺ …)
+        (AND(_has(_jong()), gt(V("받침짝"), 0)),
+         [setv("입력종", charat("".join(DOUBLE_FINALS), plus(quot(minus(V("받침짝"), 1), 3), 1)))]),
+        otherwise=[IN_COMMIT(), setv("입력초", _ja())]),
+)
+_mo = lambda: IN_MO.p("모음")
+IN_MO.define(
+    setv("모음짝", find(VOWEL_PAIRS, join("|", _jung(), _mo(), "|"))),
+    ELIF_CHAIN(
+        # 받침 뒤에 모음이 오면 받침은 다음 글자의 첫소리가 된다 (겹받침은 뒤쪽만: 닭+ㅣ → 달기)
+        (_has(_jong()),
+         [setv("넘길자음", _jong()), setv("받침짝", find("".join(DOUBLE_FINALS), _jong())),
+          IFELSE(gt(V("받침짝"), 0),
+                 [setv("입력종", charat("".join(p[0] for p in DOUBLE_FINALS.values()), V("받침짝"))),
+                  setv("넘길자음", charat("".join(p[1] for p in DOUBLE_FINALS.values()), V("받침짝")))],
+                 [setv("입력종", "")]),
+          IN_COMMIT(), setv("입력초", V("넘길자음")), setv("입력중", _mo())]),
+        # 겹모음 (ㅗ+ㅏ → ㅘ …)
+        (AND(_has(_jung()), gt(V("모음짝"), 0)),
+         [setv("입력중", charat("".join(DOUBLE_VOWELS), plus(quot(minus(V("모음짝"), 1), 3), 1)))]),
+        (AND(_has(_cho()), _none(_jung())), [setv("입력중", _mo())]),
+        otherwise=[IN_COMMIT(), setv("입력중", _mo())]),
+)
+IN_KEY.define(
+    # 한/영 모드와 Shift 에 따라 넣을 글자를 고른다. 자음·모음이면 조합하고, 아니면 그대로 붙인다
+    # (조합 중인 글자까지 INPUT_MAX 자가 되면 더 받지 않는다. '조합글' 은 입력창을 그릴 때마다 새로 만든다)
+    IF(lt(plus(slen(V("입력글")), slen(V("조합글"))), INPUT_MAX),
+       IFELSE(eq(V("입력모드"), "영"),
+              [IFELSE(KEY_DOWN(K_SHIFT), [setv("넣을글", IN_KEY.p("Shift 글자"))], [setv("넣을글", IN_KEY.p("글자"))])],
+              [IFELSE(KEY_DOWN(K_SHIFT), [setv("넣을글", IN_KEY.p("Shift 한글"))], [setv("넣을글", IN_KEY.p("한글"))])]),
+       ELIF_CHAIN(
+           (AND(eq(slen(V("넣을글")), 1), contains(CHO, V("넣을글"))), [IN_JA(V("넣을글"))]),
+           (AND(eq(slen(V("넣을글")), 1), contains(JUNG, V("넣을글"))), [IN_MO(V("넣을글"))]),
+           otherwise=[IN_COMMIT(), setv("입력글", join(V("입력글"), V("넣을글")))])),
+    IN_DRAW(),
+)
+IN_BACK.define(
+    # 조합 중이면 자모 하나씩 (ㄺ → ㄹ, ㅘ → ㅗ), 아니면 글자 하나를 지운다
+    ELIF_CHAIN(
+        (_has(_jong()),
+         [setv("받침짝", find("".join(DOUBLE_FINALS), _jong())),
+          IFELSE(gt(V("받침짝"), 0),
+                 [setv("입력종", charat("".join(p[0] for p in DOUBLE_FINALS.values()), V("받침짝")))],
+                 [setv("입력종", "")])]),
+        (_has(_jung()),
+         [setv("모음짝", find("".join(DOUBLE_VOWELS), _jung())),
+          IFELSE(gt(V("모음짝"), 0),
+                 [setv("입력중", charat("".join(p[0] for p in DOUBLE_VOWELS.values()), V("모음짝")))],
+                 [setv("입력중", "")])]),
+        (_has(_cho()), [setv("입력초", "")]),
+        (_has(V("입력글")), [setv("입력글", TAIL(V("입력글"), 1))])),
+    IN_DRAW(),
+)
+IN_SEND.define(
+    # Enter ⏎: 엔봇이 대답하는 중이 아니면 입력한 글을 보낸다 (메인 스크립트가 '전송' 을 기다리고 있다)
+    IF(AND(eq(V("챗봇준비"), 1), eq(V("처리중"), 0), eq(V("전송"), 0)),
+       IN_COMMIT(),
+       IF(_has(TRIM(V("입력글"))), setv("보낸글", V("입력글")), setv("입력글", ""), setv("전송", 1)),
+       IN_DRAW()),
+)
+IN_MODE.define(
+    IN_COMMIT(),
+    IFELSE(eq(V("입력모드"), "영"), [setv("입력모드", "한")], [setv("입력모드", "영")]),
+    IN_DRAW(),
+)
+IN_DRAW.define(
+    IN_COMPOSE(),
+    setv("입력보임", join(V("입력글"), V("조합글"))),
+    IF(gt(slen(V("입력보임")), INPUT_SHOW),
+       setv("입력보임", join("…", HEAD(V("입력보임"), minus(slen(V("입력보임")), INPUT_SHOW - 1))))),
+    CAST("입력창 그리기"),
+)
+
+
+def input_scripts():
+    """입력창 글상자에 붙는 키 입력 스크립트들과 그리기. 챗봇이 준비된 뒤에만 받는다."""
+    ready = lambda *body: IF(eq(V("챗봇준비"), 1), *body)
+    scripts = [WHEN_KEY(code, ready(IN_KEY(a, b, c, d))) for code, a, b, c, d in KEYS]
+    scripts += [
+        # Shift+Space 는 한/영 바꾸기
+        WHEN_KEY(K_SPACE, ready(IFELSE(KEY_DOWN(K_SHIFT), [IN_MODE()], [IN_KEY(" ", " ", " ", " ")]))),
+        WHEN_KEY(K_ENTER, ready(IN_SEND())),
+        WHEN_KEY(K_BACKSPACE, ready(IN_BACK())),
+        # ← → Esc: 조합 중인 글자를 확정한다 ('좋아ㅋㅋ' 처럼 자음만 따로 쓰고 싶을 때)
+        *[WHEN_KEY(code, ready(IN_COMMIT(), IN_DRAW())) for code in (K_LEFT, K_RIGHT, K_ESC)],
+        WHEN_MSG("입력창 그리기",
+                 IFELSE(eq(slen(V("입력보임")), 0),
+                        [WRITE(V("입력안내")), FG(NOTICE_FG)],
+                        [WRITE(join(V("입력보임"), "|")), FG(INPUT_FG)])),
+    ]
+    return scripts
+
+
 # ================================================================ 메인
 def main_script():
-    clean_input = repl(repl(repl(repl(repl(repl(repl(answer(), SEP, " "), "[", "("), "]", ")"), "{", "("), "}", ")"), "|", "/"),
+    clean_input = repl(repl(repl(repl(repl(repl(repl(V("보낸글"), SEP, " "), "[", "("), "]", ")"), "{", "("), "}", ")"), "|", "/"),
                        "¤", " ")
-    # 표지의 '시작하기' 를 누르면 시작한다
-    return WHEN_MSG(
-        "챗봇 시작",
+    # ▶ 시작하면 바로 시작한다 (표지는 그때 숨는다)
+    return WHEN_START(
         setv("챗봇준비", 0), setv("처리중", 1),
         setv("글자-받침없음", D.NO_BATCHIM), setv("글자-ㄹ받침", D.RIEUL), setv("글자-ㅆ받침", D.SSANG_SIOT),
-        HIDE_ANSWER(),
+        # 아래쪽 입력창 (한글 입력기)
+        setv("입력글", ""), setv("입력초", ""), setv("입력중", ""), setv("입력종", ""), setv("입력모드", "한"),
+        setv("전송", 0), setv("보낸글", ""), setv("조합글", ""), setv("입력안내", "엔봇을 깨우는 중…"), IN_DRAW(),
         clear("화면글"), clear("화면종류"), clear("후보답변"), clear("내질문"), clear("내답변"),
         clear("단어들"), clear("원단어들"),
         # 대화기록표(테이블)는 '기록표연결' 이 1 일 때만 쓴다 (값은 작품에 저장된 대로 둔다)
@@ -2058,12 +2221,13 @@ def main_script():
         PRINT(V("답변"), "봇"),
         setv("보인답변", V("답변")),
         DRAW_SIDE(), STATUS_UPDATE(),
+        setv("입력안내", "메시지를 입력하고 Enter ⏎"), IN_DRAW(),
         setv("대화중", 1), setv("처리중", 0), setv("챗봇준비", 1),
         UNTIL(eq(V("대화중"), 0),
-              CAST("말풍선 지우기"),
-              ASK("메시지를 입력하세요"),
+              # 아래 입력창에 입력하고 Enter ⏎ 를 누를 때까지 기다린다 (키 입력은 '입력글자' 오브젝트가 받는다)
+              UNTIL(eq(V("전송"), 1)),
               # 저장 형식과 템플릿 기호를 깨뜨리는 글자는 바꿔 둔다
-              setv("메시지", TRIM(clean_input)),
+              setv("메시지", TRIM(clean_input)), setv("전송", 0),
               # 왼쪽 칸을 누른 일을 처리하는 중이면 끝날 때까지 기다린다
               UNTIL(eq(V("처리중"), 0)),
               IF(gt(slen(V("메시지")), 0),
@@ -2094,6 +2258,7 @@ def main_script():
                  setv("처리중", 0))),
         setv("챗봇준비", 0),
         STATUS("● 대화 종료"),
+        setv("입력글", ""), setv("입력안내", "대화가 끝났어요 · 다시 하려면 ▶ 시작"), IN_DRAW(),
     )
 
 
@@ -2253,20 +2418,28 @@ def build():
     scene_id = gen_id()
     ASSETS.clear()
     bot_rows, me_rows, status_script = ui_scripts()
-    engine_scripts = [main_script(), *side_handlers(), WHEN_MSG("말풍선 지우기", UNSAY())]
+    engine_scripts = [main_script(), *side_handlers()]
     icons, side = side_objects(scene_id)
-    # 맨 앞이 가장 위에 그려진다. 처음에는 표지(썸네일)와 '시작하기' 버튼이 화면을 덮고 있다
+    # 맨 앞이 가장 위에 그려진다. 표지(대표 이미지)는 멈춰 있을 때만 무대를 덮고, ▶ 시작하면 바로 숨는다
+    # (엔트리는 정지하면 오브젝트를 시작 전 상태로 되돌리므로 다시 보인다)
     objects = [
-        sprite("시작하기", [picture("시작하기")], -138, -65, 0.25, scene_id=scene_id,
-               script=[WHEN_START(SHOW()), WHEN_CLICK(HIDE(), CAST("챗봇 시작"))]),
-        sprite("표지", [picture("표지")], 0, 0, 0.5, scene_id=scene_id,
-               script=[WHEN_START(SHOW()), WHEN_MSG("챗봇 시작", HIDE())]),
+        sprite("표지", [picture("표지")], 0, 0, 0.5, scene_id=scene_id, script=[WHEN_START(HIDE())]),
         text_box("상태", "● 연결 중…", 228, 121, 11, "#A7F3D0", align=2, script=status_script, scene_id=scene_id),
         text_box("제목", "🤖 엔봇", LEFT_X, 121, 16, "#FFFFFF", align=1, font="yg-jalnan", scene_id=scene_id),
         text_box("부제", "기억하는 AI 친구", -160, 120, 11, "#C7D2FE", align=1, scene_id=scene_id),
         text_box("헤더", " ", 0, 121, 12, "#FFFFFF", bg=HEADER_BG, width=480, height=28, line_break=True,
                  scene_id=scene_id),
         *icons, *side,
+        # 아래쪽 입력창: [한] [메시지를 입력하고 Enter ⏎ …] [⏎]
+        text_box("한영버튼", "한", -221, INPUT_Y, 11, KEYCAP_FG, bg=KEYCAP_BG, width=26, height=26, line_break=True,
+                 bold=True, scene_id=scene_id,
+                 script=[WHEN_CLICK(IF(eq(V("챗봇준비"), 1), IN_MODE())),
+                         WHEN_MSG("입력창 그리기", IFELSE(eq(V("입력모드"), "영"), [WRITE("A")], [WRITE("한")]))]),
+        text_box("보내기버튼", "⏎", 219, INPUT_Y, 13, "#FFFFFF", bg=HEADER_BG, width=34, height=26, line_break=True,
+                 bold=True, scene_id=scene_id, script=[WHEN_CLICK(IF(eq(V("챗봇준비"), 1), IN_SEND()))]),
+        text_box("입력글자", " ", -198, INPUT_Y, 11, INPUT_FG, align=1, script=input_scripts(), scene_id=scene_id),
+        text_box("입력칸", " ", -6, INPUT_Y, 11, INPUT_BG, bg=INPUT_BG, width=386, height=26, line_break=True,
+                 scene_id=scene_id),
     ]
     for k in range(1, ROWS + 1):
         y = ROW_TOP - (k - 1) * ROW_STEP
@@ -2275,10 +2448,10 @@ def build():
         objects.append(text_box(f"봇칸{k}", " ", CHAT_LEFT, y, 12, BOT_FG, bg=BOT_BG, align=1, height=ROW_H,
                                 script=bot_rows[k], visible=False, scene_id=scene_id))
     objects += [
-        text_box("엔봇", "메시지를 입력하고 Enter ⏎  ·  왼쪽 💾 로 저장", CHAT_CENTER, -60, 10, NOTICE_FG,
-                 script=engine_scripts, scene_id=scene_id),
-        text_box("대화배경", " ", CHAT_CENTER, 28.5, 12, CHAT_BG, bg=CHAT_BG, width=CHAT_W, height=157,
-                 line_break=True, scene_id=scene_id),
+        text_box("엔봇", "Enter ⏎ 보내기  ·  Backspace 지우기  ·  Shift+Space 한/영  ·  왼쪽 💾 저장", 0, HINT_Y, 9,
+                 NOTICE_FG, script=engine_scripts, scene_id=scene_id),
+        text_box("대화배경", " ", CHAT_CENTER, (SIDE_TOP + SIDE_BOTTOM) / 2, 12, CHAT_BG, bg=CHAT_BG, width=CHAT_W,
+                 height=SIDE_TOP - SIDE_BOTTOM, line_break=True, scene_id=scene_id),
     ]
 
     tables = [
@@ -2312,7 +2485,7 @@ def build():
          "isCloud": False, "isRealTime": False, "cloudDate": False, "object": None, "x": 134, "y": -70},
         {"name": "대답", "id": gen_id(), "visible": False, "value": "0", "variableType": "answer",
          "isCloud": False, "isRealTime": False, "cloudDate": False, "object": None, "x": 150, "y": -100},
-        *[variable(n, {"기록표연결": 0}.get(n, "")) for n in VARS],
+        *[variable(n, {"기록표연결": 0, "한글표": HANGUL}.get(n, "")) for n in VARS],
         *lists,
     ]
     return {
